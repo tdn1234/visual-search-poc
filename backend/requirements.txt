@@ -5,6 +5,14 @@ python-multipart==0.0.9
 
 # --- ML / embeddings ---
 # CLIP model + processor come from Hugging Face transformers.
+#
+# IMPORTANT: install the CPU-only torch build FIRST, or pip will pull
+# PyPI's default GPU build and download ~2GB of unneeded NVIDIA CUDA
+# libraries. This POC only needs CPU inference:
+#
+#   pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+#
 torch==2.4.1
 transformers==4.44.2
 

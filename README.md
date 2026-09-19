@@ -199,6 +199,12 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 
 ```bash
 pip install --upgrade pip
+
+# Install the CPU-only torch build FIRST. Skipping this step makes
+# pip fall back to PyPI's default GPU build, which drags in ~2GB of
+# unneeded NVIDIA CUDA libraries.
+pip install torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu
+
 pip install -r requirements.txt
 ```
 
@@ -261,21 +267,26 @@ curl -X POST "http://127.0.0.1:8000/search" \
 
 ### Expected response
 
+This is real output from querying with `catalog/shoe-red/image.jpg`
+against the included sample catalog:
+
 ```json
 {
   "results": [
-    { "sku": "shoe-red",  "name": "Running Shoe Red",  "price": 99.0, "category": "Shoes", "score": 0.9994 },
-    { "sku": "shoe-blue", "name": "Running Shoe Blue", "price": 99.0, "category": "Shoes", "score": 0.8721 },
-    { "sku": "shoe-black","name": "Running Shoe Black","price": 109.0,"category": "Shoes", "score": 0.8544 },
-    { "sku": "watch-silver","name": "Classic Watch Silver","price": 149.0,"category": "Accessories","score": 0.5013 },
-    { "sku": "hat-green", "name": "Baseball Cap Green", "price": 19.0, "category": "Accessories", "score": 0.4108 }
+    { "sku": "shoe-red",    "name": "Running Shoe Red",   "price": 99.0,  "category": "Shoes",   "score": 1.0 },
+    { "sku": "shoe-black",  "name": "Running Shoe Black", "price": 109.0, "category": "Shoes",   "score": 0.9092 },
+    { "sku": "shoe-blue",   "name": "Running Shoe Blue",  "price": 99.0,  "category": "Shoes",   "score": 0.9054 },
+    { "sku": "bag-brown",   "name": "Leather Bag Brown",  "price": 129.0, "category": "Bags",    "score": 0.8571 },
+    { "sku": "tshirt-black","name": "Cotton T-Shirt Black","price": 25.0,  "category": "Apparel", "score": 0.8565 }
   ]
 }
 ```
 
-(Exact scores will vary — the included sample catalog uses simple
-generated placeholder shapes, not real photos, so treat the relative
-ranking as the meaningful part of the demo.)
+The exact query image scores 1.0 (identical), the other two shoes rank
+next, and everything else trails behind — exactly what you'd expect
+from CLIP similarity. Scores will differ slightly with your own photos
+— the included sample catalog uses simple generated placeholder shapes,
+not real product photos.
 
 ### Health check
 

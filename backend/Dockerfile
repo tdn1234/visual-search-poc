@@ -9,6 +9,11 @@ WORKDIR /app
 # requirements.txt actually changes.
 COPY backend/requirements.txt backend/requirements.txt
 RUN pip install --no-cache-dir --upgrade pip \
+    # PyPI's default 'torch' wheel bundles ~2GB of NVIDIA CUDA
+    # libraries we don't need (this POC is CPU-only). Installing from
+    # PyTorch's dedicated CPU index first keeps the image small and
+    # the build fast on a normal laptop.
+    && pip install --no-cache-dir torch==2.4.1 --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend/ backend/
