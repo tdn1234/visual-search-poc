@@ -1,0 +1,25 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: visual-search-backend
+    ports:
+      - "8010:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    volumes:
+      # Live-reload app/script code without rebuilding the image.
+      - ./backend/app:/app/backend/app
+      - ./backend/scripts:/app/backend/scripts
+      # Catalog and generated index stay on the host, so editing
+      # products or rebuilding embeddings doesn't require a rebuild.
+      - ./catalog:/app/catalog
+      - ./backend/data:/app/backend/data
+      # Persist the downloaded CLIP weights across container restarts
+      # and rebuilds (first run downloads ~600MB from Hugging Face).
+      - huggingface_cache:/root/.cache/huggingface
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  huggingface_cache:

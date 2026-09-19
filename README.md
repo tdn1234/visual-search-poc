@@ -12,6 +12,20 @@ Product image → CLIP embedding → embeddings.json → cosine similarity → A
 
 See [`docs/architecture.md`](docs/architecture.md) for the full explanation.
 
+## Quick start
+
+Two ways to run this. Docker is the least fiddly (no local Python/venv
+setup), the local option is faster to iterate on if you're editing code.
+
+| | Docker | Local Python |
+|---|---|---|
+| Setup effort | Low — just Docker | Medium — venv + system Python 3.12 |
+| First run | Slower (builds image + downloads CLIP) | Slower (installs deps + downloads CLIP) |
+| Best for | Just trying it out | Actively developing the code |
+
+Jump to [Option A: Docker](#option-a-docker-recommended-for-first-run) or
+[Option B: Local Python setup](#option-b-local-python-setup).
+
 ## Project structure
 
 ```
@@ -34,7 +48,9 @@ visual-search-poc/
 │   │   └── build_embeddings.py      # CLI: catalog/ -> embeddings.json
 │   ├── data/
 │   │   └── embeddings.json          # generated index (not hand-written)
-│   └── requirements.txt
+│   ├── requirements.txt
+│   └── Dockerfile
+├── docker-compose.yml
 ├── catalog/
 │   ├── shoe-red/
 │   │   ├── image.jpg
@@ -103,7 +119,70 @@ values).
 This file is **generated**, never hand-edited — run
 `build_embeddings.py` to (re)create it.
 
-## Local setup
+## Option A: Docker (recommended for first run)
+
+> Requires Docker + the Compose plugin (`docker compose ...`) or the
+> standalone `docker-compose` binary (`docker-compose ...` — used
+> below; swap in whichever your machine has).
+>
+> All commands below assume you're inside `visual-search-poc/` (the
+> project root, where `docker-compose.yml` lives).
+
+The API is exposed on **host port 8010** (mapped to port 8000 inside
+the container) so it doesn't clash with anything already using 8000
+on your machine. Edit the `ports:` line in `docker-compose.yml` if you
+want a different host port.
+
+### 1. Build the image
+
+```bash
+docker-compose build
+```
+
+This installs Python deps (`torch`, `transformers`, etc.) into the
+image. First build downloads a few hundred MB and can take several
+minutes; it's cached after that.
+
+### 2. Build the embeddings index
+
+Run the indexing script as a one-off container using the same image
+(no need to start the API first):
+
+```bash
+docker-compose run --rm backend python scripts/build_embeddings.py
+```
+
+This writes to `./backend/data/embeddings.json` on your host (it's a
+mounted volume), and downloads CLIP's weights (~600 MB, once) into a
+named Docker volume (`huggingface_cache`) so later runs/rebuilds don't
+re-download them.
+
+### 3. Start the API
+
+```bash
+docker-compose up
+```
+
+The API is now live at `http://127.0.0.1:8010`. Interactive docs
+(Swagger UI) are at `http://127.0.0.1:8010/docs`. Stop it with `Ctrl+C`,
+or run detached with `docker-compose up -d` and stop later with
+`docker-compose down`.
+
+`app/`, `scripts/`, `catalog/`, and `backend/data/` are all
+volume-mounted into the container and `uvicorn` runs with `--reload`,
+so editing code or the catalog on your host is picked up without
+rebuilding the image. You only need to `docker-compose build` again if
+you change `backend/requirements.txt` or the `Dockerfile`.
+
+### Docker troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `port is already allocated` | Something else on your host is using port 8010. Change the host-side port in `docker-compose.yml`'s `ports:` (e.g. `"8020:8000"`). |
+| Build hangs/times out downloading torch | Slow network — just retry `docker-compose build`; pip resumes from cache where possible. |
+| `/search` returns 503 "Catalog not indexed yet" | You skipped step 2, or `backend/data/embeddings.json` doesn't exist yet — run the `build_embeddings.py` one-off command above. |
+
+## Option B: Local Python setup
 
 > Requires Python 3.12 (3.10+ also works). All commands below assume
 > you're inside `visual-search-poc/backend/`.
@@ -160,18 +239,22 @@ The API is now live at `http://127.0.0.1:8000`. Interactive docs
 
 ## Testing the API
 
+> Use port `8010` if you started the API via Docker (Option A), or
+> `8000` if you started it locally (Option B).
+
 ### curl
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/search" \
   -H "accept: application/json" \
   -F "file=@catalog/shoe-red/image.jpg;type=image/jpeg"
+# Docker users: replace 8000 with 8010
 ```
 
 ### Postman
 
 1. Method: `POST`
-2. URL: `http://127.0.0.1:8000/search`
+2. URL: `http://127.0.0.1:8000/search` (or `:8010` for Docker)
 3. Body → `form-data`
 4. Key: `file`, type `File`, value: pick any product photo
 5. Send
@@ -197,7 +280,7 @@ ranking as the meaningful part of the demo.)
 ### Health check
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/health   # or :8010 for Docker
 # {"status":"ok"}
 ```
 
