@@ -1,0 +1,18 @@
+[
+  {
+    "sku": "shoe-red",
+    "name": "Running Shoe Red",
+    "price": 99.0,
+    "category": "Shoes",
+    "image_path": "catalog/shoe-red/image.jpg",
+    "embedding": [0.0182, -0.0431, 0.0705, "...", -0.0123]
+  },
+  {
+    "sku": "shoe-blue",
+    "name": "Running Shoe Blue",
+    "price": 99.0,
+    "category": "Shoes",
+    "image_path": "catalog/shoe-blue/image.jpg",
+    "embedding": [0.0179, -0.0455, 0.0699, "...", -0.0110]
+  }
+]

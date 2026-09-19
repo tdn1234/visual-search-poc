@@ -1,0 +1,19 @@
+# --- Web framework ---
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.9
+
+# --- ML / embeddings ---
+# CLIP model + processor come from Hugging Face transformers.
+torch==2.4.1
+transformers==4.44.2
+
+# --- Image handling ---
+pillow==10.4.0
+
+# --- Similarity search ---
+scikit-learn==1.5.1
+numpy==1.26.4
+
+# --- Data validation ---
+pydantic==2.9.2
