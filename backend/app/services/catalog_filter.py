@@ -82,9 +82,9 @@ def filter_by_category_or_color(
     if category is None and color is None:
         return catalog
 
-    def matches(product: ProductRecord) -> bool:
-        category_match = category is not None and product.category.lower() == category.lower()
-        color_match = color is not None and product.color is not None and product.color.lower() == color.lower()
-        return category_match or color_match
-
-    return [product for product in catalog if matches(product)]
+    return [
+        product
+        for product in catalog
+        if (category is not None and _category_matches(product, category))
+        or (color is not None and _color_matches(product, color))
+    ]

@@ -18,6 +18,12 @@ rank other-colored shoes above same-colored other items. The optional
 **color adapter** (see [below](#color-adapter-optional-local-fine-tune))
 fixes that with a small trained head, without touching CLIP itself.
 
+There are also two ways to filter results by category/color instead of
+just ranking by overall similarity — a plain metadata filter
+([`GET /products`](#get-products-plain-metadata-filter)) and checkboxes
+on the image search itself
+([`match_category`/`match_color`](#matching-the-uploaded-images-own-categorycolor)).
+
 ## Quick start
 
 Two ways to run this. Docker is the least fiddly (no local Python/venv
@@ -41,23 +47,29 @@ visual-search-poc/
 │   │   ├── main.py                  # FastAPI app + startup wiring
 │   │   ├── config.py                # paths, model name, constants
 │   │   ├── models/
-│   │   │   ├── clip_model.py        # CLIP model wrapper (image/text -> vector)
-│   │   │   └── color_adapter.py     # optional color-aware head + loader
+│   │   │   ├── clip_model.py        # CLIP model wrapper (image/text -> vector, zero-shot classify)
+│   │   │   ├── color_adapter.py     # optional color-aware head + loader
+│   │   │   └── category_classifier.py  # trained category-classification head + loader
 │   │   ├── services/
 │   │   │   ├── embedding_service.py     # bytes/file -> (adapted) embedding
 │   │   │   ├── similarity_service.py    # cosine similarity + ranking
-│   │   │   └── indexing_service.py      # build/load embeddings.json
+│   │   │   ├── indexing_service.py      # build/load embeddings.json
+│   │   │   ├── attribute_classifier_service.py  # classify an uploaded image's category/color
+│   │   │   └── catalog_filter.py        # category/color filtering (AND for /products, OR for /search)
 │   │   ├── api/
-│   │   │   └── search.py            # POST /search route
+│   │   │   ├── search.py            # POST /search route
+│   │   │   └── products.py          # GET /products route
 │   │   └── schemas/
 │   │       └── search.py            # Pydantic request/response models
 │   ├── scripts/
 │   │   ├── build_embeddings.py      # CLI: catalog/ -> embeddings.json
 │   │   ├── generate_training_data.py # CLI: synthetic color/category dataset
-│   │   └── train_color_adapter.py    # CLI: train the color adapter head
+│   │   ├── train_color_adapter.py    # CLI: train the color adapter head
+│   │   └── train_category_classifier.py  # CLI: train the category classifier head
 │   ├── data/
 │   │   ├── embeddings.json          # generated index (not hand-written)
 │   │   ├── color_adapter.pt         # trained adapter weights (optional, generated)
+│   │   ├── category_classifier.pt   # trained classifier weights (optional, generated)
 │   │   └── training/                # synthetic training set (generated)
 │   ├── requirements.txt
 │   └── Dockerfile
@@ -66,17 +78,17 @@ visual-search-poc/
 │   ├── shoe-red/
 │   │   ├── image.jpg
 │   │   └── metadata.json
-│   └── ... (16 sample products included)
+│   └── ... (17 sample products included)
 ├── docs/
 │   ├── architecture.md
 │   └── sample_embeddings.json       # illustrative format only
 └── README.md
 ```
 
-A sample catalog of 16 generated placeholder products is already
+A sample catalog of 17 generated placeholder products is already
 included under `catalog/` so you can run the whole pipeline
 immediately — it spans 4 categories (Shoes, Bags, Apparel,
-Accessories) and 7 colors, with enough overlap
+Accessories) and 8 colors, with enough overlap
 (e.g. red shoes *and* red hats *and* red t-shirts) to actually see the
 color adapter's effect. Swap in real product photos whenever you're
 ready — just keep the same `<sku>/image.jpg` + `<sku>/metadata.json`
@@ -107,12 +119,13 @@ catalog/
 ```
 
 Required fields: `sku`, `name`, `price`, `category`. `color` is
-optional — it's stored on `ProductRecord`/`embeddings.json` for future
-use (e.g. filtering), but the `/search` response and ranking today
-don't read it; color-awareness currently comes entirely from the
-[color adapter](#color-adapter-optional-local-fine-tune) acting on the
-image embedding, not from this metadata field. The image must be
-named `image.jpg`, `image.jpeg`, or `image.png`.
+optional. Two independent things use `category`/`color`: the
+[color adapter](#color-adapter-optional-local-fine-tune) nudges
+*ranking* based on the image itself (no metadata involved), while
+[`GET /products`](#get-products-plain-metadata-filter) and the
+[`match_category`/`match_color`](#matching-the-uploaded-images-own-categorycolor)
+search checkboxes filter against this metadata field directly. The
+image must be named `image.jpg`, `image.jpeg`, or `image.png`.
 
 ## Embedding storage format
 
@@ -258,8 +271,8 @@ INFO ... CLIP model loaded successfully.
 INFO ... Indexed product 'bag-black'
 INFO ... Indexed product 'bag-blue'
 ...
-INFO ... Wrote 16 product embeddings to .../embeddings.json
-INFO ... Done. Indexed 16 products in 12.3s.
+INFO ... Wrote 17 product embeddings to .../embeddings.json
+INFO ... Done. Indexed 17 products in 12.3s.
 ```
 
 ### 4. Start the API
@@ -337,6 +350,99 @@ INFO ... Loaded color adapter from .../backend/data/color_adapter.pt
 If you skip training, you'll instead see a warning that it's falling
 back to raw CLIP — that's expected and non-fatal.
 
+## Category classifier (powers `match_category`)
+
+Used by the `match_category` search checkbox (below) to figure out
+"what category is *in* this uploaded photo." The first version of
+this used zero-shot CLIP classification (compare the image to text
+prompts like `"a photo of shoes"`) — the same technique that works
+fine for color. It didn't work for category: on a real test image,
+similarity scores across all four categories landed within 0.02 of
+each other, essentially random, because this catalog's placeholder
+images are abstract solid-color shapes that pretrained CLIP was never
+exposed to as "product categories." Color survives zero-shot because
+it's a literal pixel property; category doesn't.
+
+So category classification uses the same fix as color: freeze CLIP,
+train a small head (`CategoryClassifier`,
+`app/models/category_classifier.py` — a linear layer, simpler than the
+color adapter's residual MLP since this is plain classification, not
+embedding-space nudging) on the synthetic training set.
+
+```bash
+python scripts/generate_training_data.py     # if you haven't already
+python scripts/train_category_classifier.py
+# Docker: docker-compose run --rm backend python scripts/train_category_classifier.py
+```
+
+Reuses the same cached embeddings as `train_color_adapter.py`
+(`embedding_cache.npz`) — training itself takes well under a second.
+Saves weights to `backend/data/category_classifier.pt`; `main.py`
+loads it at startup the same way it loads the color adapter, and
+`AttributeClassifierService` falls back to (unreliable) zero-shot
+classification with a warning if no checkpoint exists.
+
+**On keeping the training set's shapes matched to the real catalog:**
+`generate_training_data.py`'s synthetic shapes need to actually
+resemble the real catalog's placeholders, or the classifier trains
+well on its own held-out validation split (97%+) but doesn't
+generalize to the real catalog it's meant to classify. This bit twice
+during development: the training set's hat was a half-circle while
+every real hat is a full circle, and its t-shirt had collar notches
+while every real t-shirt is a plain rectangle. Both are now aligned
+(see `CATEGORY_BOX_SIZE` and the shape-drawing functions in
+`generate_training_data.py`). If you add a new category to the catalog
+with a visibly different placeholder style, keep the training
+generator's shape in sync or expect the classifier to be unreliable
+for it. Current accuracy on this project's real 17-item catalog: 15/17
+(the 2 misses are `Bags` vs. `Apparel`, whose placeholder shapes are
+now a near-identical rounded-rect vs. sharp-rect at the same size — a
+genuinely subtle cue, not a training bug).
+
+## Filtering by category/color
+
+Two independent ways to narrow results, on top of everything above:
+
+### `GET /products` (plain metadata filter)
+
+No image involved — just filters the catalog's `category`/`color`
+metadata fields, exact and case-insensitive:
+
+```bash
+curl "http://127.0.0.1:8010/products?category=Shoes&color=red"
+```
+
+Passing both filters is **AND** (narrows to items matching both — e.g.
+this returns only red shoes). Passing neither returns the whole
+catalog. An unmatched filter returns `{"results": []}`, not an error.
+See `app/api/products.py`.
+
+### Matching the uploaded image's own category/color
+
+`POST /search` takes two optional boolean query params,
+`match_category` and `match_color` (they show up as checkboxes in
+Swagger UI at `/docs` — booleans render that way automatically). Check
+one to have the *uploaded image itself* classified (via
+`AttributeClassifierService` — zero-shot for color, the trained
+`CategoryClassifier` for category) and results restricted to catalog
+items sharing that prediction:
+
+```bash
+curl -X POST "http://127.0.0.1:8010/search?match_color=true" \
+  -F "file=@catalog/shoe-red/image.jpg;type=image/jpeg"
+# every result is guaranteed red
+
+curl -X POST "http://127.0.0.1:8010/search?match_category=true&match_color=true" \
+  -F "file=@catalog/shoe-red/image.jpg;type=image/jpeg"
+# every result is a shoe, or red, or both
+```
+
+Passing both is **OR** (widens rather than narrows — the opposite of
+`/products`, deliberately: narrowing to AND here would mean neither
+filter alone could ever broaden a search). See the docstring on
+`search_by_image` in `app/api/search.py`, and `catalog_filter.py` for
+where the AND/OR split actually lives.
+
 ## Testing the API
 
 > Use port `8010` if you started the API via Docker (Option A), or
@@ -369,19 +475,19 @@ applied** (see [above](#color-adapter-optional-local-fine-tune)):
 {
   "results": [
     { "sku": "shoe-red",   "name": "Running Shoe Red",   "price": 99.0,  "category": "Shoes",       "score": 1.0 },
-    { "sku": "hat-red",    "name": "Baseball Cap Red",   "price": 19.0,  "category": "Accessories", "score": 0.7695 },
-    { "sku": "tshirt-red", "name": "Cotton T-Shirt Red", "price": 25.0,  "category": "Apparel",     "score": 0.5416 },
-    { "sku": "hat-black",  "name": "Baseball Cap Black", "price": 19.0,  "category": "Accessories", "score": 0.3599 },
-    { "sku": "shoe-black", "name": "Running Shoe Black", "price": 109.0, "category": "Shoes",       "score": 0.2387 }
+    { "sku": "tshirt-red", "name": "Cotton T-Shirt Red", "price": 25.0,  "category": "Apparel",     "score": 0.5194 },
+    { "sku": "hat-red",    "name": "Baseball Cap Red",   "price": 19.0,  "category": "Accessories", "score": 0.5176 },
+    { "sku": "shoe-black", "name": "Running Shoe Black", "price": 109.0, "category": "Shoes",       "score": 0.3955 },
+    { "sku": "shoe-blue",  "name": "Running Shoe Blue",  "price": 99.0,  "category": "Shoes",       "score": 0.349 }
   ]
 }
 ```
 
 The exact query image scores 1.0 (identical), and — because of the
-color adapter — other **red** items (`hat-red`, `tshirt-red`) outrank
-other **shoes** (`shoe-black`). Without the adapter (raw CLIP,
-`backend/data/color_adapter.pt` absent/not loaded), the same query
-ranks the other shoes highest instead:
+color adapter — other **red** items (`tshirt-red`, `hat-red`) outrank
+other **shoes** (`shoe-black`, `shoe-blue`). Without the adapter (raw
+CLIP, `backend/data/color_adapter.pt` absent/not loaded), the same
+query ranks the other shoes highest instead:
 
 ```json
 {
@@ -421,8 +527,10 @@ curl http://127.0.0.1:8000/health   # or :8010 for Docker
 
 - **V1 (this POC):** CLIP (`clip-vit-base-patch32`) + JSON file storage
   + brute-force cosine similarity, with an optional trained
-  [color adapter](#color-adapter-optional-local-fine-tune) on top.
-  Fine up to a few hundred products.
+  [color adapter](#color-adapter-optional-local-fine-tune) for ranking
+  and a trained [category classifier](#category-classifier-powers-match_category)
+  + [category/color filters](#filtering-by-categorycolor) for narrowing
+  results. Fine up to a few hundred products.
 - **V2:** CLIP + PostgreSQL with the `pgvector` extension. Replaces
   `embeddings.json` with a `products` table and an ANN index
   (`ivfflat`/`hnsw`), so `IndexingService`/`SimilarityService` gain
@@ -431,10 +539,10 @@ curl http://127.0.0.1:8000/health   # or :8010 for Docker
   product images to this service on save; a Magento block/API calls
   `/search` from the storefront (e.g. a "search by image" widget) and
   resolves returned SKUs back to real Magento product pages.
-- **V4:** Hybrid image + text search. Use CLIP's *text* encoder too,
-  so a query can combine an uploaded image with a text filter (e.g.
-  "red shoes under $100") by blending/filtering on both embedding
-  spaces plus structured metadata.
+- **V4:** Free-text query support. `match_category`/`match_color`
+  already cover structured filtering; a further step would let a
+  query combine an uploaded image with free text (e.g. "under $100")
+  via CLIP's text encoder plus structured metadata like `price`.
 - **V5:** Recommendation engine. Reuse the same embedding space for
   "customers who viewed this also liked" style recommendations,
   combined with behavioral signals (views, purchases) rather than
