@@ -73,15 +73,15 @@ def _draw_bag(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], fill: t
 
 
 def _draw_hat(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], fill: tuple[int, int, int]) -> None:
-    draw.pieslice(box, start=180, end=360, fill=fill)
+    draw.ellipse(box, fill=fill)
 
 
 def _draw_shirt(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], fill: tuple[int, int, int]) -> None:
-    x0, y0, x1, y1 = box
-    width = x1 - x0
-    draw.rectangle((x0 + width * 0.2, y0, x1 - width * 0.2, y1), fill=fill)
-    draw.polygon([(x0, y0 + 20), (x0 + width * 0.2, y0), (x0 + width * 0.2, y0 + 60)], fill=fill)
-    draw.polygon([(x1, y0 + 20), (x1 - width * 0.2, y0), (x1 - width * 0.2, y0 + 60)], fill=fill)
+    # Plain rectangle, matching the real catalog's tshirt-black/white
+    # placeholders -- no collar notches (an earlier version had them,
+    # which didn't match either the real catalog or this project's own
+    # later tshirt-red/tshirt-brown additions).
+    draw.rectangle(box, fill=fill)
 
 
 def _draw_watch(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int], fill: tuple[int, int, int]) -> None:
@@ -107,13 +107,30 @@ def _jitter_color(rgb: tuple[int, int, int], amount: int = 12) -> tuple[int, int
     return tuple(max(0, min(255, channel + random.randint(-amount, amount))) for channel in rgb)
 
 
-def _jitter_box(size: int = IMAGE_SIZE, base_extent: int = 220) -> tuple[int, int, int, int]:
-    """Return a randomly sized/positioned bounding box roughly centered in the canvas."""
-    extent = base_extent + random.randint(-30, 30)
-    cx = size / 2 + random.randint(-25, 25)
-    cy = size / 2 + random.randint(-25, 25)
-    half = extent / 2
-    return (cx - half, cy - half * 0.7, cx + half, cy + half * 0.7)
+# Base (width, height) per category, matching the actual aspect ratio
+# used by the real catalog placeholders (measured from their pixel
+# bounding boxes) -- e.g. shoes are wide and flat, hats/bags are
+# roughly square. Using a shared generic box for every category (the
+# original approach) let the trained classifier overfit to jitter
+# noise instead of the aspect ratio that actually distinguishes
+# categories, and didn't generalize to the catalog's real proportions.
+CATEGORY_BOX_SIZE: dict[str, tuple[int, int]] = {
+    "shoe": (283, 125),
+    "bag": (220, 240),
+    "hat": (264, 256),
+    "shirt": (220, 240),
+    "watch": (200, 203),
+}
+
+
+def _jitter_box(category: str, size: int = IMAGE_SIZE) -> tuple[int, int, int, int]:
+    """Return a randomly sized/positioned bounding box for `category`, centered in the canvas."""
+    base_width, base_height = CATEGORY_BOX_SIZE[category]
+    width = base_width + random.randint(-20, 20)
+    height = base_height + random.randint(-20, 20)
+    cx = size / 2 + random.randint(-15, 15)
+    cy = size / 2 + random.randint(-15, 15)
+    return (cx - width / 2, cy - height / 2, cx + width / 2, cy + height / 2)
 
 
 def generate_dataset(
@@ -144,7 +161,7 @@ def generate_dataset(
             for _ in range(samples_per_combo):
                 image = Image.new("RGB", (IMAGE_SIZE, IMAGE_SIZE), BACKGROUND)
                 draw = ImageDraw.Draw(image)
-                box = _jitter_box()
+                box = _jitter_box(category)
                 fill = _jitter_color(base_rgb)
                 draw_fn(draw, box, fill)
 

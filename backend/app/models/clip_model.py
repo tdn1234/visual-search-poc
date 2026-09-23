@@ -1,13 +1,14 @@
 """CLIP model wrapper.
 
 Responsibility: load the pretrained CLIP model/processor exactly once
-and expose a single method that turns a PIL image into a normalized
-embedding vector (a plain Python list of floats).
+and expose image encoding, text encoding, and zero-shot classification
+built on top of them -- all as plain Python types (lists of floats,
+strings), never tensors.
 
 Nothing else in the codebase should import `transformers` or `torch`
-directly for image encoding -- everything goes through this class so
-the ML framework can be swapped later (e.g. for a different model or
-an ONNX runtime) without touching services or the API layer.
+directly for inference -- everything goes through this class so the
+ML framework can be swapped later (e.g. for a different model or an
+ONNX runtime) without touching services or the API layer.
 """
 
 from __future__ import annotations
@@ -97,8 +98,9 @@ class ClipModel:
     def encode_text(self, texts: list[str]) -> list[list[float]]:
         """Encode a batch of text strings into normalized CLIP embeddings.
 
-        Used for adapter training (e.g. contrasting an image embedding
-        against a caption like "a brown bag"), not by the search API.
+        Used for adapter training (contrasting an image embedding
+        against a caption like "a brown bag") and for zero-shot
+        classification (see `classify`).
 
         Args:
             texts: A batch of raw strings.
@@ -115,3 +117,35 @@ class ClipModel:
 
         embedding: np.ndarray = normalized_features.cpu().numpy()
         return embedding.tolist()
+
+    @torch.no_grad()
+    def classify(self, image_embedding: list[float], candidate_texts: dict[str, str]) -> str:
+        """Zero-shot classify a precomputed image embedding against text prompts.
+
+        Standard CLIP zero-shot classification: encode every candidate
+        prompt, and return whichever one is most similar (cosine, via
+        dot product since both sides are L2-normalized) to
+        `image_embedding`. This always uses the *raw* CLIP embedding
+        space, never the color adapter's -- the adapter is trained to
+        help ranking, not classification, and mixing the two spaces
+        here would give meaningless similarities.
+
+        Args:
+            image_embedding: A normalized embedding from `encode_image`
+                (not one that's been through `ColorAdapter`).
+            candidate_texts: Mapping of label -> prompt text, e.g.
+                `{"Shoes": "a photo of shoes"}`.
+
+        Returns:
+            Whichever key of `candidate_texts` has the highest-scoring
+            prompt.
+        """
+        labels = list(candidate_texts.keys())
+        prompts = list(candidate_texts.values())
+
+        image_vector = torch.tensor(image_embedding, dtype=torch.float32)
+        text_vectors = torch.tensor(self.encode_text(prompts), dtype=torch.float32)
+
+        similarities = text_vectors @ image_vector
+        best_index = int(similarities.argmax())
+        return labels[best_index]
