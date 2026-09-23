@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.products import router as products_router
 from app.api.search import router as search_router
 from app.config import COLOR_ADAPTER_FILE, EMBEDDINGS_FILE
 from app.models.clip_model import ClipModel
@@ -65,6 +66,7 @@ app = FastAPI(
 )
 
 app.include_router(search_router)
+app.include_router(products_router)
 
 
 @app.get("/health", tags=["health"])

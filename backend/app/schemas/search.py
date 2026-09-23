@@ -38,3 +38,19 @@ class SearchResponse(BaseModel):
     """Top-level response envelope for POST /search."""
 
     results: list[SearchResult]
+
+
+class ProductSummary(BaseModel):
+    """A catalog product without its embedding, for browsing/filtering."""
+
+    sku: str
+    name: str
+    price: float
+    category: str
+    color: str | None = None
+
+
+class ProductListResponse(BaseModel):
+    """Top-level response envelope for GET /products."""
+
+    results: list[ProductSummary]
