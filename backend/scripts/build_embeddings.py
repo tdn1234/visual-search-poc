@@ -27,8 +27,9 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.config import CATALOG_DIR, EMBEDDINGS_FILE  # noqa: E402
+from app.config import CATALOG_DIR, COLOR_ADAPTER_FILE, EMBEDDINGS_FILE  # noqa: E402
 from app.models.clip_model import ClipModel  # noqa: E402
+from app.models.color_adapter import load_color_adapter  # noqa: E402
 from app.services.embedding_service import EmbeddingService  # noqa: E402
 from app.services.indexing_service import IndexingService  # noqa: E402
 
@@ -46,8 +47,9 @@ def main() -> None:
     logger.info("Loading CLIP model (this can take a while on first run, "
                 "since it downloads the model from Hugging Face)...")
     clip_model = ClipModel()
+    color_adapter = load_color_adapter(COLOR_ADAPTER_FILE)
 
-    embedding_service = EmbeddingService(clip_model=clip_model)
+    embedding_service = EmbeddingService(clip_model=clip_model, color_adapter=color_adapter)
     indexing_service = IndexingService(embedding_service=embedding_service)
 
     try:

@@ -17,8 +17,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.search import router as search_router
-from app.config import EMBEDDINGS_FILE
+from app.config import COLOR_ADAPTER_FILE, EMBEDDINGS_FILE
 from app.models.clip_model import ClipModel
+from app.models.color_adapter import load_color_adapter
 from app.services.embedding_service import EmbeddingService
 from app.services.indexing_service import IndexingService
 from app.services.similarity_service import SimilarityService
@@ -37,8 +38,9 @@ async def lifespan(app: FastAPI):
     """
     logger.info("Starting up: loading CLIP model...")
     clip_model = ClipModel()
+    color_adapter = load_color_adapter(COLOR_ADAPTER_FILE)
 
-    embedding_service = EmbeddingService(clip_model=clip_model)
+    embedding_service = EmbeddingService(clip_model=clip_model, color_adapter=color_adapter)
     indexing_service = IndexingService(embedding_service=embedding_service)
     similarity_service = SimilarityService()
 

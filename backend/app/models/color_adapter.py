@@ -8,16 +8,23 @@ train on a CPU laptop because it only ever does matrix ops on cached
 512-dim vectors, never a forward/backward pass through the CLIP
 backbone.
 
-Not wired into the search API yet -- this module + the training
-script in `scripts/train_color_adapter.py` are the training-side
-scaffold. Applying the trained adapter at index/query time is a
-follow-up integration step.
+Trained via `scripts/train_color_adapter.py`, which saves weights to
+`backend/data/color_adapter.pt`. `load_color_adapter` below loads that
+checkpoint for use by `EmbeddingService`, which applies it (when
+present) to every embedding it produces -- both catalog images (at
+index time) and the query image (at search time) -- so the two sides
+stay in the same adapted space.
 """
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import torch
 from torch import nn
+
+logger = logging.getLogger(__name__)
 
 
 class ColorAdapter(nn.Module):
@@ -54,3 +61,38 @@ class ColorAdapter(nn.Module):
         """
         adapted = embeddings + self.net(embeddings)
         return adapted / adapted.norm(p=2, dim=-1, keepdim=True)
+
+
+def load_color_adapter(checkpoint_file: Path) -> ColorAdapter | None:
+    """Load a trained `ColorAdapter` from disk, if one has been trained.
+
+    Returns `None` (rather than raising) when no checkpoint exists yet,
+    so the app can start up and serve plain-CLIP search before anyone
+    has run `scripts/train_color_adapter.py` -- consistent with how
+    `IndexingService.load_index` treats a missing embeddings.json.
+
+    Args:
+        checkpoint_file: Path to a `.pt` file saved by
+            `scripts/train_color_adapter.py`.
+
+    Returns:
+        A `ColorAdapter` in eval mode, or `None` if `checkpoint_file`
+        does not exist.
+    """
+    if not checkpoint_file.exists():
+        logger.warning(
+            "No color adapter checkpoint at %s. Search will use raw CLIP "
+            "embeddings. Run 'python scripts/train_color_adapter.py' to train one.",
+            checkpoint_file,
+        )
+        return None
+
+    checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=True)
+    adapter = ColorAdapter(
+        embedding_dim=checkpoint["embedding_dim"],
+        hidden_dim=checkpoint["hidden_dim"],
+    )
+    adapter.load_state_dict(checkpoint["state_dict"])
+    adapter.eval()
+    logger.info("Loaded color adapter from %s", checkpoint_file)
+    return adapter

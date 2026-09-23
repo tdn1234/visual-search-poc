@@ -13,6 +13,7 @@ PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
 CATALOG_DIR: Path = PROJECT_ROOT / "catalog"
 DATA_DIR: Path = PROJECT_ROOT / "backend" / "data"
 EMBEDDINGS_FILE: Path = DATA_DIR / "embeddings.json"
+COLOR_ADAPTER_FILE: Path = DATA_DIR / "color_adapter.pt"
 
 # --- Model configuration ---------------------------------------------------
 CLIP_MODEL_NAME: str = "openai/clip-vit-base-patch32"
