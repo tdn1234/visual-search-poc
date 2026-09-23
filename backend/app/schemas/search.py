@@ -19,6 +19,7 @@ class ProductRecord(BaseModel):
     name: str = Field(..., description="Human-readable product name.")
     price: float = Field(..., description="Product price.")
     category: str = Field(..., description="Product category, e.g. 'Shoes'.")
+    color: str | None = Field(None, description="Dominant product color, e.g. 'brown'. Optional.")
     image_path: str = Field(..., description="Path to the source image, relative to the project root.")
     embedding: list[float] = Field(..., description="L2-normalized CLIP image embedding.")
 

@@ -2,5 +2,6 @@
   "sku": "shoe-black",
   "name": "Running Shoe Black",
   "price": 109.0,
-  "category": "Shoes"
+  "category": "Shoes",
+  "color": "black"
 }

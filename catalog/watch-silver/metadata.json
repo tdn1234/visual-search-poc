@@ -2,5 +2,6 @@
   "sku": "watch-silver",
   "name": "Classic Watch Silver",
   "price": 149.0,
-  "category": "Accessories"
+  "category": "Accessories",
+  "color": "silver"
 }

@@ -92,3 +92,26 @@ class ClipModel:
             return embedding.tolist()
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"Could not encode image with CLIP: {exc}") from exc
+
+    @torch.no_grad()
+    def encode_text(self, texts: list[str]) -> list[list[float]]:
+        """Encode a batch of text strings into normalized CLIP embeddings.
+
+        Used for adapter training (e.g. contrasting an image embedding
+        against a caption like "a brown bag"), not by the search API.
+
+        Args:
+            texts: A batch of raw strings.
+
+        Returns:
+            A list of L2-normalized 512-dim embeddings, one per input string.
+        """
+        inputs = self.processor(text=texts, return_tensors="pt", padding=True, truncation=True)
+        inputs = {key: value.to(self.device) for key, value in inputs.items()}
+
+        text_features = self.model.get_text_features(**inputs)
+        norm = text_features.norm(p=2, dim=-1, keepdim=True)
+        normalized_features = text_features / norm
+
+        embedding: np.ndarray = normalized_features.cpu().numpy()
+        return embedding.tolist()

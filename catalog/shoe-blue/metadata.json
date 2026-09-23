@@ -2,5 +2,6 @@
   "sku": "shoe-blue",
   "name": "Running Shoe Blue",
   "price": 99.0,
-  "category": "Shoes"
+  "category": "Shoes",
+  "color": "blue"
 }

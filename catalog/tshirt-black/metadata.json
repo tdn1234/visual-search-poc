@@ -2,5 +2,6 @@
   "sku": "tshirt-black",
   "name": "Cotton T-Shirt Black",
   "price": 25.0,
-  "category": "Apparel"
+  "category": "Apparel",
+  "color": "black"
 }

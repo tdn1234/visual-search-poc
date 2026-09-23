@@ -2,5 +2,6 @@
   "sku": "tshirt-white",
   "name": "Cotton T-Shirt White",
   "price": 25.0,
-  "category": "Apparel"
+  "category": "Apparel",
+  "color": "white"
 }

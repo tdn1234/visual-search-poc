@@ -138,6 +138,7 @@ class IndexingService:
             name=metadata["name"],
             price=metadata["price"],
             category=metadata["category"],
+            color=metadata.get("color"),
             image_path=str(image_path.relative_to(catalog_dir.parent)),
             embedding=embedding,
         )

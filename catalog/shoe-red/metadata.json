@@ -2,5 +2,6 @@
   "sku": "shoe-red",
   "name": "Running Shoe Red",
   "price": 99.0,
-  "category": "Shoes"
+  "category": "Shoes",
+  "color": "red"
 }

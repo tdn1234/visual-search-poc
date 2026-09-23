@@ -2,4 +2,6 @@ venv/
 __pycache__/
 *.pyc
 backend/data/embeddings.json
+backend/data/training/
+backend/data/color_adapter.pt
 .env

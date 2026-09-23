@@ -2,5 +2,6 @@
   "sku": "hat-green",
   "name": "Baseball Cap Green",
   "price": 19.0,
-  "category": "Accessories"
+  "category": "Accessories",
+  "color": "green"
 }

@@ -2,5 +2,6 @@
   "sku": "bag-brown",
   "name": "Leather Bag Brown",
   "price": 129.0,
-  "category": "Bags"
+  "category": "Bags",
+  "color": "brown"
 }
