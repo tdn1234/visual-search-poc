@@ -64,6 +64,19 @@ TRAINING_TO_CATALOG_CATEGORY = {
 }
 
 
+def _resolve_category(raw_category: str) -> str:
+    """Map a manifest sample's category to a catalog-level category name.
+
+    Handles both synthetic samples (raw_category is a per-shape word
+    like "shoe", looked up in TRAINING_TO_CATALOG_CATEGORY) and
+    imported real photos (raw_category is already a catalog-level name
+    like "Shoes", from scripts/import_real_photos.py).
+    """
+    if raw_category in TRAINING_TO_CATALOG_CATEGORY.values():
+        return raw_category
+    return TRAINING_TO_CATALOG_CATEGORY[raw_category]
+
+
 @torch.no_grad()
 def _accuracy(classifier: CategoryClassifier, embeddings: torch.Tensor, targets: torch.Tensor, indices: np.ndarray) -> float:
     classifier.eval()
@@ -92,7 +105,7 @@ def train(
     category_labels = sorted(set(TRAINING_TO_CATALOG_CATEGORY.values()))
     label_to_index = {label: index for index, label in enumerate(category_labels)}
     targets_np = np.array(
-        [label_to_index[TRAINING_TO_CATALOG_CATEGORY[sample["category"]]] for sample in manifest],
+        [label_to_index[_resolve_category(sample["category"])] for sample in manifest],
         dtype=np.int64,
     )
 

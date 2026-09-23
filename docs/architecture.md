@@ -128,6 +128,7 @@ loaded.
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
 | Script | `scripts/train_color_adapter.py` | CLI entrypoint for the offline color-adapter-training flow. |
 | Script | `scripts/train_category_classifier.py` | CLI entrypoint for the offline category-classifier-training flow. Reuses `train_color_adapter.py`'s manifest/embedding-cache helpers directly rather than duplicating them. |
+| Script | `scripts/import_real_photos.py` | Merges real, labeled photos (`backend/data/real_training/<Category>/`) into `training/manifest.json`, so the training scripts above see a mix of synthetic and real examples without any change to their own logic. |
 
 Each layer only talks to the layer directly below it, so, for example,
 swapping the storage format from JSON to PostgreSQL later only
@@ -250,6 +251,48 @@ synthesized to stand in for real inputs, "does it validate well" and
 "does it look right" are both necessary checks, but neither is
 sufficient on its own -- validate against the actual deployment inputs
 too.
+
+## Real photos: a second, harder domain gap
+
+Aligning the synthetic shapes to the catalog (above) fixed
+generalization *within* this project's own synthetic-to-placeholder
+world. It did nothing for generalization to *real product photos*,
+which is a bigger gap: a real photo (natural lighting, texture,
+background clutter, multiple objects) is far outside anything the
+purely-synthetic training set ever produced.
+
+Verified concretely: fed a real (fairly messy) photo of a sneaker to
+the trained `CategoryClassifier`, it predicted "Accessories" (0.307)
+over "Shoes" (0.279) -- wrong, and barely more confident than a coin
+flip. Fed the same photo to *untrained* zero-shot CLIP, it correctly
+favored "Shoes" (0.277, highest). That's the inverse of the earlier
+finding: the classifier's linear decision boundary was fit only to
+the synthetic embedding distribution, so a real photo's embedding
+lands somewhere that boundary was never calibrated for, while
+zero-shot CLIP -- pretrained on millions of real photos -- is
+well-calibrated for exactly this input. Neither "trained" nor
+"zero-shot" is universally better; each is only reliable on the kind
+of image it actually learned from.
+
+`scripts/import_real_photos.py` addresses this the direct way: merge
+real, labeled photos into the same manifest the training scripts
+already read (`backend/data/real_training/<Category>/*.jpg`, imported
+into `training/manifest.json` alongside the synthetic entries), so
+`train_category_classifier.py` and `train_color_adapter.py` train on
+a mix without any change to the training loop itself -- they don't
+know or care whether a sample is synthetic or real.
+
+**What one real example proved, and what it didn't:** importing a
+single real photo and retraining flipped that exact photo's prediction
+from wrong to right. That confirms the import → retrain → predict
+mechanism works, but with `n=1` there's no way to distinguish "the
+classifier learned something transferable about real shoes" from "the
+classifier memorized this one embedding." A real generalization claim
+needs either a held-out real photo the classifier never trained on, or
+enough real examples per category that a train/val split over *real*
+data is meaningful -- the same reasoning that motivated checking the
+synthetic classifier against real catalog images in the first place,
+one level up.
 
 ## Filtering: AND vs OR
 

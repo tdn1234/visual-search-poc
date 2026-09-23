@@ -65,12 +65,14 @@ visual-search-poc/
 │   │   ├── build_embeddings.py      # CLI: catalog/ -> embeddings.json
 │   │   ├── generate_training_data.py # CLI: synthetic color/category dataset
 │   │   ├── train_color_adapter.py    # CLI: train the color adapter head
-│   │   └── train_category_classifier.py  # CLI: train the category classifier head
+│   │   ├── train_category_classifier.py  # CLI: train the category classifier head
+│   │   └── import_real_photos.py     # CLI: merge real_training/ photos into the manifest
 │   ├── data/
 │   │   ├── embeddings.json          # generated index (not hand-written)
 │   │   ├── color_adapter.pt         # trained adapter weights (optional, generated)
 │   │   ├── category_classifier.pt   # trained classifier weights (optional, generated)
-│   │   └── training/                # synthetic training set (generated)
+│   │   ├── training/                # synthetic + imported real training set (generated)
+│   │   └── real_training/           # your real photos to import (gitignored, you provide)
 │   ├── requirements.txt
 │   └── Dockerfile
 ├── docker-compose.yml
@@ -398,6 +400,86 @@ for it. Current accuracy on this project's real 17-item catalog: 15/17
 (the 2 misses are `Bags` vs. `Apparel`, whose placeholder shapes are
 now a near-identical rounded-rect vs. sharp-rect at the same size — a
 genuinely subtle cue, not a training bug).
+
+**Trained only on synthetic shapes, it doesn't generalize to real
+photos.** Tested against a real (fairly messy — bare foot, patterned
+background, two objects in frame) photo of a sneaker: the trained
+classifier gave "Accessories" 0.307 vs. "Shoes" 0.279 — essentially a
+coin flip, and wrong. Plain *zero-shot* CLIP (no training at all) got
+the same photo right (0.277 for "Shoes", highest). That's the mirror
+image of the earlier synthetic-image problem: the classifier's
+decision boundary was fit entirely to the synthetic embedding
+distribution, so a real photo lands somewhere it was never calibrated
+for, while zero-shot CLIP -- pretrained on millions of real photos --
+is actually in its element there. See
+[Training with real photos](#training-with-real-photos) below for the
+fix.
+
+## Training with real photos
+
+`generate_training_data.py`'s synthetic shapes only teach the category
+classifier about *this project's own placeholder catalog*. To make
+`match_category` reliable on real product photos, it needs real
+examples in the training set too -- `scripts/import_real_photos.py`
+merges them into the same manifest the training scripts already read,
+so nothing else about the training pipeline changes.
+
+### 1. Organize your photos by category
+
+```
+backend/data/real_training/
+  Shoes/
+    my-sneaker.jpg
+    red-another-shoe.jpg
+  Bags/
+    ...
+  Accessories/
+    ...
+  Apparel/
+    ...
+```
+
+Folder names must exactly match a real catalog category (`Shoes`,
+`Bags`, `Accessories`, `Apparel`). Optionally prefix a filename with a
+recognized color and a hyphen (e.g. `red-my-sneaker.jpg`) to also
+label its color for color-adapter training -- otherwise the photo
+still counts for category training, just not color training. This
+directory is gitignored (personal/local photos, not committed).
+
+### 2. Import and retrain
+
+```bash
+python scripts/generate_training_data.py   # if you haven't already
+python scripts/import_real_photos.py
+python scripts/train_category_classifier.py
+# Docker: docker-compose run --rm backend python scripts/{import_real_photos,train_category_classifier}.py
+```
+
+`import_real_photos.py` is idempotent -- re-run it anytime after
+adding more photos; it only imports files not already in the manifest.
+It logs each imported photo with its detected category/color.
+
+### 3. Rebuild the index and restart, same as any other retrain
+
+```bash
+python scripts/build_embeddings.py
+uvicorn app.main:app --reload   # or: docker-compose restart backend
+```
+
+### A real but limited result so far
+
+Adding just **one** real photo (a genuinely messy real-world shot, not
+a clean product photo) flipped that exact photo's `match_category`
+prediction from wrong ("Accessories") to correct ("Shoes"). That
+proves the import → retrain → predict pipeline works end to end, but
+**not** that the classifier now generalizes to real photos in
+general -- with a single example, "learned to recognize shoes" and
+"memorized this one photo" are indistinguishable. A meaningful
+generalization check needs either a held-out real photo not used in
+training, or enough real examples per category (roughly a handful or
+more) that training/validation on real data actually means something.
+Treat `match_category` as unproven on new real photos until you've
+done one of those.
 
 ## Filtering by category/color
 

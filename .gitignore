@@ -5,4 +5,6 @@ backend/data/embeddings.json
 backend/data/training/
 backend/data/color_adapter.pt
 backend/data/category_classifier.pt
+backend/data/real_training/
+backend/data/test_uploads/
 .env
