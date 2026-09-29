@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import logging
+import time
 from pathlib import Path
 
 import torch
@@ -63,7 +64,10 @@ class EmbeddingService:
                 "Uploaded file is not a valid image (jpg/png/webp)."
             ) from exc
 
-        return self._apply_adapter(self._clip_model.encode_image(image))
+        start_time = time.perf_counter()
+        embedding = self._apply_adapter(self._clip_model.encode_image(image))
+        logger.debug("CLIP embed (upload, %s) took %.1fms", image.format, (time.perf_counter() - start_time) * 1000)
+        return embedding
 
     def embed_image_file(self, image_path: Path) -> list[float]:
         """Generate an embedding for an image stored on disk.
@@ -87,7 +91,10 @@ class EmbeddingService:
         except UnidentifiedImageError as exc:
             raise ValueError(f"File is not a valid image: {image_path}") from exc
 
-        return self._apply_adapter(self._clip_model.encode_image(image))
+        start_time = time.perf_counter()
+        embedding = self._apply_adapter(self._clip_model.encode_image(image))
+        logger.debug("CLIP embed (%s) took %.1fms", image_path.name, (time.perf_counter() - start_time) * 1000)
+        return embedding
 
     def _apply_adapter(self, embedding: list[float]) -> list[float]:
         """Run a raw CLIP embedding through the color adapter, if one is loaded."""

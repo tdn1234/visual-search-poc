@@ -64,6 +64,10 @@ services:
       # in app/config.py: SEARCH_RATE_LIMIT=20/minute, PRODUCTS_RATE_LIMIT=60/minute).
       # - SEARCH_RATE_LIMIT=20/minute
       # - PRODUCTS_RATE_LIMIT=60/minute
+      # DEBUG adds per-step timing logs (CLIP embed, attribute
+      # classification, the pgvector query) for each request -- see
+      # docs/architecture.md's "Logging and request correlation" section.
+      # - LOG_LEVEL=DEBUG
     depends_on:
       db:
         condition: service_healthy

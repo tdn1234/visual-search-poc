@@ -27,6 +27,8 @@ from app.api.products import router as products_router
 from app.api.search import router as search_router
 from app.config import API_KEY, CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE
 from app.db import create_pool
+from app.logging_config import configure_logging
+from app.middleware import RequestContextMiddleware
 from app.models.category_classifier import load_category_classifier
 from app.models.clip_model import ClipModel
 from app.models.color_adapter import load_color_adapter
@@ -35,7 +37,7 @@ from app.services.attribute_classifier_service import AttributeClassifierService
 from app.services.embedding_service import EmbeddingService
 from app.services.product_query_service import ProductQueryService
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+configure_logging()
 logger = logging.getLogger(__name__)
 
 _DEFAULT_API_KEY = "dev-api-key-change-me"
@@ -92,6 +94,11 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+# Added last so it becomes the *outermost* middleware (Starlette wraps in
+# reverse registration order): the request ID must be assigned before
+# rate limiting runs, and the access-log line must see the real final
+# status code (200/401/429/...), not just whatever SlowAPIMiddleware saw.
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(search_router)
 app.include_router(products_router)

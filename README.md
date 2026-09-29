@@ -64,6 +64,8 @@ visual-search-poc/
 │   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
 │   │   ├── auth.py                  # X-API-Key header check (require_api_key)
 │   │   ├── rate_limit.py            # Redis-backed slowapi Limiter instance
+│   │   ├── logging_config.py        # log format + request-ID correlation filter
+│   │   ├── middleware.py            # assigns request IDs, logs one access-log line per request
 │   │   └── schemas/
 │   │       └── search.py            # Pydantic request/response models
 │   ├── scripts/
@@ -761,6 +763,53 @@ same bucket instead of limiting each one individually. Counters live
 in Redis with a self-expiring TTL matching the window (a minute), so
 nothing needs manual cleanup; restarting the `redis` container/service
 simply resets everyone's count to zero.
+
+## Logging and request correlation
+
+Every request gets a short ID (from an inbound `X-Request-ID` header,
+or a freshly generated one) that's attached to every log line emitted
+while handling it, and echoed back as an `X-Request-ID` response
+header. This is what makes `docker-compose logs` useful for debugging
+one specific request instead of scrolling through everything:
+
+```bash
+docker-compose logs backend | grep 8ab05fc3a21b
+```
+
+Every route logs one line on completion:
+
+```
+2026-09-29 08:26:56 [INFO] [8ab05fc3a21b] app.middleware: GET /products -> 200 (7.4ms)
+```
+
+**Set `LOG_LEVEL=DEBUG`** (env var, `app/config.py`) to additionally
+log a per-step timing breakdown from the services that do the real
+work -- CLIP embedding, attribute classification, the pgvector query
+-- so a slow `/search` call is diagnosable from the logs alone,
+without adding print statements or attaching a profiler:
+
+```bash
+# docker-compose: uncomment the LOG_LEVEL line in docker-compose.yml, then
+docker-compose up -d backend
+
+# local Python:
+export LOG_LEVEL=DEBUG
+```
+
+```
+2026-09-29 08:30:39 [DEBUG] [16d1...] app.services.embedding_service: CLIP embed (upload, JPEG) took 752.9ms
+2026-09-29 08:30:39 [DEBUG] [16d1...] app.services.attribute_classifier_service: Attribute classification took 686.0ms (category='Shoes', color='red')
+2026-09-29 08:30:39 [DEBUG] [16d1...] app.services.product_query_service: pgvector search_similar (top_k=5, category='Shoes', color='red') took 4.4ms, 5 rows
+2026-09-29 08:30:39 [INFO]  [16d1...] app.middleware: POST /search -> 200 (830.2ms)
+```
+
+(real output, from a `match_category=true&match_color=true` search —
+shows attribute classification, not CLIP embedding or the DB query, as
+the dominant cost when those checkboxes are on.) Third-party libraries'
+own DEBUG logs (`multipart`, `urllib3`, `PIL`, `httpcore`/`httpx`) are
+pinned to `WARNING` regardless of `LOG_LEVEL`, since their protocol-level
+internals are noise here, not debugging signal — see
+`app/logging_config.py`'s `_NOISY_LOGGERS`.
 
 ## Error handling
 

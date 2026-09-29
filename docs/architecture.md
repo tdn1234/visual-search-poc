@@ -136,9 +136,11 @@ loaded.
 | Infra | `app/db.py` | Owns the psycopg connection pool, registers pgvector's Python adapter, and ensures the `vector` extension/`products` table/HNSW index exist. The only module that imports psycopg. |
 | Infra | `app/auth.py` | `require_api_key`, a FastAPI dependency checking the `X-API-Key` header against `API_KEY`. Applied at the router level in `api/search.py`/`api/products.py`, not per-route. |
 | Infra | `app/rate_limit.py` | The single Redis-backed `slowapi` `Limiter` instance, keyed by client IP. Endpoints import it to set their own `@limiter.limit(...)`; `main.py` wires the shared exception handler/middleware once. |
+| Infra | `app/logging_config.py` | Configures the root logger once (`configure_logging`, called first thing in `main.py`); owns `request_id_var` (a `ContextVar`) and the filter that stamps it onto every log record. Pins noisy third-party loggers to `WARNING`. |
+| Infra | `app/middleware.py` | `RequestContextMiddleware` -- the only thing that sets `request_id_var`. Assigns/propagates a request ID, logs one access-log line per request with timing, sets the `X-Request-ID` response header. Registered as the outermost middleware. |
 | API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a `SEARCH_RATE_LIMIT` limit (CLIP inference is the expensive part). |
 | API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. Router-level auth + a looser `PRODUCTS_RATE_LIMIT`. |
-| Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit exception handler/middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
+| Entrypoint | `app/main.py` | Configures logging first, then wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit and request-logging middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
 | Script | `scripts/train_color_adapter.py` | CLI entrypoint for the offline color-adapter-training flow. |
@@ -204,6 +206,57 @@ import time -- `from __future__ import annotations` and slowapi's
 decorator-based API don't compose cleanly through FastAPI's route
 introspection. Every other module keeps the future import; only these
 two routers omit it.
+
+## Logging and request correlation
+
+A third cross-cutting concern, alongside auth and rate limiting, also
+applied once rather than woven through every endpoint:
+
+- **`app/logging_config.py`** owns the root logger's setup
+  (`configure_logging()`, called once from `main.py` before anything
+  else runs -- every module's `logging.getLogger(__name__)` inherits
+  this rather than configuring its own handlers). It defines
+  `request_id_var`, a `contextvars.ContextVar[str]`, and a
+  `logging.Filter` that stamps every emitted `LogRecord` with whatever
+  value is currently in that var. It also pins known-noisy third-party
+  loggers (`multipart`, `urllib3`, `PIL`, `httpcore`/`httpx`) to
+  `WARNING` regardless of the app's own `LOG_LEVEL`, since their
+  protocol-level internals (every multipart chunk, every connection-pool
+  event) are noise, not debugging signal, at DEBUG.
+
+- **`app/middleware.py`**'s `RequestContextMiddleware` is the *only*
+  thing that ever sets `request_id_var` -- once per request, from an
+  inbound `X-Request-ID` header if the caller sent one (so a single ID
+  can thread through this service's logs *and* an upstream caller's
+  own tracing) or a fresh one otherwise. It's registered as the
+  **outermost** middleware (`app.add_middleware(...)` called *after*
+  `SlowAPIMiddleware` in `main.py` -- Starlette wraps in reverse
+  registration order, so the last-added middleware runs first on the
+  way in and last on the way out): the request ID must exist before
+  rate limiting even runs, and the access-log line needs to see the
+  real final status code, including a 401 from `require_api_key` or a
+  429 from the rate limiter, not just whatever the inner layers saw.
+
+Because `request_id_var` is a `ContextVar` rather than a value passed
+explicitly, every service function downstream of the middleware --
+`EmbeddingService`, `AttributeClassifierService`,
+`ProductQueryService` -- gets request correlation for free just by
+calling `logger.debug(...)`/`logger.info(...)` normally. None of them
+know a request ID exists; `docker-compose logs backend | grep
+<request-id>` still pulls out every line for one request across all of
+them, because the middleware set the context before any of that code
+ran and Python's `contextvars` propagate down through async calls
+automatically.
+
+`LOG_LEVEL=DEBUG` additionally turns on per-step timing logs in the
+three services actually worth timing: `EmbeddingService` (CLIP
+inference), `AttributeClassifierService` (the `match_category`/
+`match_color` classification), and `ProductQueryService.search_similar`
+(the pgvector query). Each logs its own elapsed time, so a slow
+`/search` request is diagnosable straight from the logs -- e.g. real
+output from a `match_category=true&match_color=true` request shows
+attribute classification (686ms) dominating over CLIP embedding
+(136ms) and the pgvector query (4ms), not the vector search itself.
 
 ## Similarity ranking, step by step
 

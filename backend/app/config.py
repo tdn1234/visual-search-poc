@@ -23,6 +23,14 @@ EMBEDDING_DIM: int = 512  # clip-vit-base-patch32's image/text feature dimension
 # Force CPU for a laptop-friendly POC. Set to "cuda" manually if you have a GPU.
 DEVICE: str = "cpu"
 
+# --- Logging -----------------------------------------------------------------
+# Standard `logging` level name ("DEBUG", "INFO", "WARNING", ...). DEBUG
+# additionally turns on per-step timing logs (embedding, classification,
+# the pgvector query) in the services that do the real work -- see
+# app.logging_config.configure_logging and docs/architecture.md's
+# "Logging and request correlation" section.
+LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
+
 # --- Vector database (pgvector) --------------------------------------------
 # The product index (embeddings + metadata) lives in Postgres, not on
 # disk. In docker-compose this is overridden to point at the `db`

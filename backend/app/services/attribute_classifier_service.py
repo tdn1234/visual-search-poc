@@ -24,6 +24,7 @@ worked fine for color (a literal pixel property, not shape/semantics):
 from __future__ import annotations
 
 import logging
+import time
 
 from PIL import Image
 
@@ -75,6 +76,7 @@ class AttributeClassifierService:
         if not category_labels and not color_labels:
             return None, None
 
+        start_time = time.perf_counter()
         image_embedding = self._clip_model.encode_image(image)
 
         predicted_category = (
@@ -84,6 +86,10 @@ class AttributeClassifierService:
             self._clip_model.classify(image_embedding, self._color_prompts(color_labels))
             if color_labels
             else None
+        )
+        logger.debug(
+            "Attribute classification took %.1fms (category=%r, color=%r)",
+            (time.perf_counter() - start_time) * 1000, predicted_category, predicted_color,
         )
         return predicted_category, predicted_color
 

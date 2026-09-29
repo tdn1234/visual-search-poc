@@ -15,10 +15,15 @@ version this replaced.
 
 from __future__ import annotations
 
+import logging
+import time
+
 from psycopg_pool import ConnectionPool
 
 from app.config import TOP_K_RESULTS
 from app.schemas.search import ProductSummary, SearchResult
+
+logger = logging.getLogger(__name__)
 
 
 class ProductQueryService:
@@ -105,8 +110,13 @@ class ProductQueryService:
             ORDER BY embedding <=> %s::vector
             LIMIT %s
         """
+        start_time = time.perf_counter()
         with self._db_pool.connection() as conn:
             rows = conn.execute(sql, params).fetchall()
+        logger.debug(
+            "pgvector search_similar (top_k=%d, category=%r, color=%r) took %.1fms, %d rows",
+            top_k, category, color, (time.perf_counter() - start_time) * 1000, len(rows),
+        )
 
         return [
             SearchResult(
