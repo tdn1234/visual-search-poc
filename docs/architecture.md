@@ -24,15 +24,14 @@ Product image (catalog/<sku>/image.jpg)
         │
         ▼
  (optional) match_category/match_color: classify the uploaded image
- itself (AttributeClassifierService) and filter the candidate pool
- (catalog_filter.filter_by_category_or_color) *before* ranking
+ itself (AttributeClassifierService) to get a predicted category/color
         │
         ▼
- Cosine similarity vs every embedding in the (possibly filtered) catalog
- (sklearn.metrics.pairwise.cosine_similarity)
-        │
-        ▼
- Sort descending, take top 5
+ ProductQueryService.search_similar: ONE SQL query --
+ `SELECT ... FROM products WHERE (category/color filter) ORDER BY
+  embedding <=> $query LIMIT 5` -- pgvector's HNSW index does the
+ nearest-neighbor ranking inside Postgres. No catalog ever loaded
+ into Python.
         │
         ▼
  JSON API response: { "results": [ {sku, name, score}, ... ] }
@@ -45,8 +44,9 @@ why it exists and how it's trained. `match_category`/`match_color`
 filtering is also optional (off unless the query params are set) --
 see [Classifying and filtering an uploaded image](#classifying-and-filtering-an-uploaded-image)
 below. `GET /products` is a separate, simpler path: it never touches
-CLIP at all, just filters the in-memory catalog's metadata directly
-(itself loaded from Postgres once, at startup).
+CLIP or pgvector at all, just a plain SQL `WHERE` filter
+(`ProductQueryService.list_products`) over the `products` table's
+metadata columns.
 
 ## Four separate flows
 
@@ -76,26 +76,28 @@ the same request:
 3. **Online search** (`POST /search`, served by FastAPI) — the CLIP
    model (and color adapter / category classifier, if present) is
    loaded **once at API startup** (see `app/main.py`'s `lifespan`
-   handler), which also opens the Postgres connection pool and loads
-   the whole `products` table into an in-memory `list[ProductRecord]`.
-   Each request pays for encoding *one* uploaded image, optionally
-   classifying it (`match_category`/`match_color`), and a
-   cosine-similarity matrix multiply against the (small,
-   filtered-or-not) in-memory catalog — all fast enough for a laptop
-   CPU, and no per-request database round trip.
+   handler), which also opens the Postgres connection pool
+   (`ProductQueryService`). The catalog itself is *not* loaded at
+   startup or cached anywhere in the process -- each request pays for
+   encoding *one* uploaded image, optionally classifying it
+   (`match_category`/`match_color`), and one pgvector nearest-neighbor
+   SQL query (`embedding <=> $query`, via the HNSW index) that does the
+   ranking inside Postgres and returns only the top-K rows.
 
 4. **Online metadata browsing** (`GET /products`, served by FastAPI) —
-   no CLIP involved at all, just an in-memory filter over the loaded
-   catalog's `category`/`color` fields. The simplest and fastest of the
-   four flows.
+   no CLIP involved at all, just a plain SQL `WHERE` filter
+   (`ProductQueryService.list_products`) over the `products` table's
+   `category`/`color` columns. The simplest and fastest of the four
+   flows.
 
 Keeping the offline flows separate from the online ones is what makes
-the "load the whole catalog into memory at startup" approach viable:
-the `products` table is rebuilt in batch by flow 2, and the API only
-ever reads it (once, at startup). It's also why flow 2 must be re-run
-after flow 1 changes the color adapter checkpoint — otherwise the
-catalog's stored embeddings and freshly-adapted query embeddings would
-be in different (non-comparable) vector spaces. (The category
+"every request queries Postgres directly, nothing cached in the app"
+viable without a per-request performance hit: the `products` table
+(and its HNSW index) is rebuilt in batch by flow 2, so flows 3 and 4
+only ever do cheap, index-backed reads. It's also why flow 2 must be
+re-run after flow 1 changes the color adapter checkpoint — otherwise
+the catalog's stored embeddings and freshly-adapted query embeddings
+would be in different (non-comparable) vector spaces. (The category
 classifier doesn't have this constraint -- it only classifies the
 *uploaded* image at query time, never touches stored catalog
 embeddings, so retraining it takes effect immediately on API restart,
@@ -106,9 +108,13 @@ no reindex needed.)
 `ClipModel.encode_image` L2-normalizes every embedding it produces
 (image norm divided by its own L2 norm) before returning it. Once both
 vectors in a comparison are unit-length, cosine similarity reduces to
-a plain dot product. This doesn't change the correctness of using
-`cosine_similarity` (it's mathematically equivalent either way), but
-it does mean the stored vectors are ready to compare directly and
+a plain dot product, and pgvector's cosine-distance operator (`<=>`,
+used by `ProductQueryService.search_similar`) is defined as
+`1 - cosine_similarity` -- which is why the service does
+`score = 1 - distance` to turn pgvector's output back into the
+similarity score the API returns. This doesn't change the correctness
+of using cosine distance (it's mathematically equivalent either way),
+but it does mean the stored vectors are ready to compare directly and
 consistently, regardless of which layer does the comparison.
 
 `ColorAdapter.forward` preserves this invariant: it adds a learned
@@ -125,13 +131,12 @@ loaded.
 | Model | `app/models/category_classifier.py` | `CategoryClassifier` (linear head) + `load_category_classifier`, same load-or-`None` pattern. |
 | Service | `app/services/embedding_service.py` | Turns raw bytes or a file path into an embedding, applying the color adapter (if loaded) after CLIP. Validates images. |
 | Service | `app/services/attribute_classifier_service.py` | Classifies an *uploaded* image's own category/color (zero-shot for color, `CategoryClassifier` for category) -- a different concern from ranking. |
-| Service | `app/services/catalog_filter.py` | Pure category/color matching over a list of `ProductRecord`. Two functions, AND and OR -- see below. |
-| Service | `app/services/indexing_service.py` | Knows the catalog folder layout and the Postgres `products` table schema. Builds (writes) and loads the index. |
-| Service | `app/services/similarity_service.py` | Pure ranking logic: cosine similarity + top-K sort. No I/O. |
+| Service | `app/services/indexing_service.py` | **Write path.** Knows the catalog folder layout and the Postgres `products` table schema. Scans `catalog/`, embeds every image, and replaces the table (run offline, by `scripts/build_embeddings.py`, never by the API). |
+| Service | `app/services/product_query_service.py` | **Read path.** Every SQL query `/search` and `/products` need: pgvector nearest-neighbor search (`search_similar`, category/color OR-filtered), plain metadata filtering (`list_products`, AND), and small helper queries (`count`, `distinct_categories`, `distinct_colors`). No caching, no in-memory catalog -- every call hits Postgres. |
 | Infra | `app/db.py` | Owns the psycopg connection pool, registers pgvector's Python adapter, and ensures the `vector` extension/`products` table/HNSW index exist. The only module that imports psycopg. |
 | API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. |
 | API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. |
-| Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`): opens the DB pool, loads models, loads the catalog into memory, exposes the FastAPI `app`. |
+| Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
 | Script | `scripts/train_color_adapter.py` | CLI entrypoint for the offline color-adapter-training flow. |
@@ -139,35 +144,50 @@ loaded.
 | Script | `scripts/import_real_photos.py` | Merges real, labeled photos (`backend/data/real_training/<Category>/`) into `training/manifest.json`, so the training scripts above see a mix of synthetic and real examples without any change to their own logic. |
 
 Each layer only talks to the layer directly below it, so, for example,
-the storage format moved from a JSON file to PostgreSQL/pgvector by
-changing only `IndexingService` (plus the new `app/db.py`) — the API
-and model layers, `SimilarityService`, and `catalog_filter` were
-untouched; they still just see a `list[ProductRecord]`. Likewise,
-`EmbeddingService` is the *only* place that knows
-whether a color adapter is active — everything downstream of it (the
-API route, `SimilarityService`) just sees embeddings and has no idea
-whether they came from raw CLIP or an adapted space. Symmetrically,
+the storage/ranking approach moved from a JSON file + in-memory
+`sklearn` cosine similarity to PostgreSQL/pgvector doing the ranking
+itself, by replacing `SimilarityService`/`catalog_filter` with
+`ProductQueryService` — the API and model layers, and
+`EmbeddingService`, were untouched; `api/search.py` still just hands a
+query embedding to one service and gets `SearchResult`s back, with no
+idea whether ranking happens in Python or SQL. Likewise,
+`EmbeddingService` is the *only* place that knows whether a color
+adapter is active — everything downstream of it (the API route,
+`ProductQueryService`) just sees embeddings and has no idea whether
+they came from raw CLIP or an adapted space. Symmetrically,
 `AttributeClassifierService` is the only place that knows *how*
 category/color get predicted for an uploaded image (zero-shot vs.
 trained classifier) — `api/search.py` just gets back two optional
-strings and hands them to `catalog_filter`.
+strings and passes them straight through to
+`ProductQueryService.search_similar` as SQL filter arguments.
 
 ## Similarity ranking, step by step
 
-1. `SimilarityService.rank_products` receives the query embedding and
-   the full in-memory catalog (a Python list of `ProductRecord`).
-2. It stacks every catalog embedding into one NumPy matrix of shape
-   `(num_products, 512)`.
-3. `sklearn.metrics.pairwise.cosine_similarity(query, matrix)` returns
-   a `(1, num_products)` array of similarity scores, one per product.
-4. `np.argsort(-scores)[:top_k]` sorts descending and slices the top 5
-   indices.
-5. Those indices are mapped back to `SearchResult` objects (sku, name,
-   price, category, score) and returned in ranked order.
+`ProductQueryService.search_similar` runs one SQL query per request --
+no catalog is ever loaded into Python:
 
-With 20-50 products this whole computation takes low single-digit
-milliseconds — no ANN index (FAISS, HNSW, etc.) is needed at this
-scale.
+1. The query embedding is bound as a `%s::vector` parameter (an
+   explicit cast: pgvector's array→vector cast only applies
+   automatically in assignment context, like an `INSERT`, not inside
+   an operator expression -- without it Postgres would bind a plain
+   Python list as `double precision[]` and `vector <=> double
+   precision[]` has no matching operator).
+2. If `match_category`/`match_color` predicted a label, it's added as
+   a `WHERE category ILIKE %s OR color ILIKE %s` clause (OR -- see
+   [Filtering: AND vs OR](#filtering-and-vs-or) below).
+3. `ORDER BY embedding <=> %s::vector LIMIT %s` -- pgvector's `<=>`
+   operator computes cosine *distance* for each row; Postgres uses the
+   `products_embedding_idx` HNSW index (created in `app/db.py`) to
+   satisfy this `ORDER BY ... LIMIT` without scanning every row, and
+   returns only the top-K.
+4. Each row's `distance` is flipped back to a similarity score
+   (`1 - distance`, see [Why embeddings are pre-normalized](#why-embeddings-are-pre-normalized))
+   and mapped to a `SearchResult`.
+
+At this catalog's scale (17 products) an HNSW index is overkill --
+brute-force would be just as fast -- but it means the same code path
+also scales to a much larger catalog without changing anything in
+`ProductQueryService` or the API layer above it.
 
 ## Color adapter, step by step
 
@@ -206,10 +226,10 @@ vectors — fast enough for a CPU laptop.
    which then runs *every* embedding it produces — catalog and query
    alike — through `ColorAdapter.forward` after CLIP encoding.
 
-**Net effect:** ranking is unchanged in shape (still cosine similarity
-in `SimilarityService`, unaware the adapter exists) — only the vector
-space the embeddings live in changes, so color differences contribute
-more to the resulting score.
+**Net effect:** ranking is unchanged in shape (still cosine
+similarity/distance, computed by pgvector's `<=>` operator, unaware
+the adapter exists) — only the vector space the embeddings live in
+changes, so color differences contribute more to the resulting score.
 
 ## Classifying and filtering an uploaded image
 
@@ -306,26 +326,30 @@ one level up.
 
 ## Filtering: AND vs OR
 
-`catalog_filter.py` has two functions that look similar but implement
-opposite combination rules, because `/products` and `/search` want
+`ProductQueryService` has two query methods that look similar but
+build opposite `WHERE` clauses, because `/products` and `/search` want
 different things when *both* `category` and `color` are given:
 
-- `filter_by_category_and_color` (used by `GET /products`): **AND**.
-  Both filters given means "narrow to this exact facet combination" --
-  e.g. `category=Shoes, color=red` returns only red shoes. This is the
-  ordinary meaning of stacking filters in a faceted browse UI.
-- `filter_by_category_or_color` (used by `POST /search`'s
-  `match_category`/`match_color`): **OR**. Both given means "widen to
-  anything matching either" -- e.g. a shoe query with both checked
-  returns every shoe *plus* every item of the query's color, not just
-  red shoes. AND would be actively wrong here: since these two
-  checkboxes are about *restricting an image search*, not stacking
-  independent facets, AND-ing them would mean neither box could ever
-  be used to broaden results along the other axis -- checking both
-  would always be either equal to or narrower than checking one, which
-  isn't what "search near this category or this color" should mean.
+- `list_products` (used by `GET /products`): **AND**
+  (`WHERE category ILIKE %s AND color ILIKE %s`, each clause only
+  added if that filter was given). Both filters given means "narrow to
+  this exact facet combination" -- e.g. `category=Shoes, color=red`
+  returns only red shoes. This is the ordinary meaning of stacking
+  filters in a faceted browse UI.
+- `search_similar` (used by `POST /search`'s `match_category`/
+  `match_color`): **OR** (`WHERE category ILIKE %s OR color ILIKE %s`).
+  Both given means "widen to anything matching either" -- e.g. a shoe
+  query with both checked returns every shoe *plus* every item of the
+  query's color, not just red shoes. AND would be actively wrong here:
+  since these two checkboxes are about *restricting an image search*,
+  not stacking independent facets, AND-ing them would mean neither box
+  could ever be used to broaden results along the other axis --
+  checking both would always be either equal to or narrower than
+  checking one, which isn't what "search near this category or this
+  color" should mean.
 
-Both functions share the same underlying match predicates
-(`_category_matches`/`_color_matches`: case-insensitive, exact,
-`color=None` never matches a product with no color set) -- only the
-`and`/`or` at the end differs.
+Both methods use `ILIKE` (case-insensitive, exact -- no `%` wildcards
+in the pattern) against the same `category`/`color` columns; a
+`NULL` `color` column never matches an `ILIKE` comparison, so a
+`color` filter naturally excludes colorless products without any extra
+`IS NOT NULL` clause. Only the `AND`/`OR` joining the clauses differs.

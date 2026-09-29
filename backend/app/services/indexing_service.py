@@ -1,16 +1,16 @@
 """Indexing service.
 
-Responsibility: build the product index (scan `catalog/`, compute an
-embedding per product, persist to the `products` table in Postgres)
-and load that index back into memory at API startup.
+Responsibility: the offline *write* path for the product index --
+scan `catalog/`, compute an embedding per product, and replace the
+`products` table in Postgres. Run manually via
+`scripts/build_embeddings.py`, never by the running API.
 
 This is the only module that knows about the on-disk catalog layout
-(`catalog/<sku>/image.jpg` + `catalog/<sku>/metadata.json`) and about
-the `products` table schema (see `app.db`). Storage is Postgres +
-pgvector, but the rest of the app is unaffected: `load_index` still
-hands back a plain `list[ProductRecord]`, so `SimilarityService`,
-`catalog_filter`, and the API routes keep working entirely in memory,
-same as when this was JSON-file-backed.
+(`catalog/<sku>/image.jpg` + `catalog/<sku>/metadata.json`). The read
+path (nearest-neighbor search, metadata filtering) is a separate
+concern -- see `ProductQueryService`, which queries the same
+`products` table (schema owned by `app.db`) directly per request
+instead of loading it into memory.
 """
 
 from __future__ import annotations
@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 class IndexingService:
-    """Builds and loads the Postgres/pgvector-backed product embedding index."""
+    """Builds the Postgres/pgvector-backed product embedding index."""
 
     def __init__(self, embedding_service: EmbeddingService, db_pool: ConnectionPool) -> None:
-        """Store references to the embedding service and DB pool used to build/load the index.
+        """Store references to the embedding service and DB pool used to build the index.
 
         Args:
             embedding_service: Used to encode catalog images.
@@ -88,41 +88,6 @@ class IndexingService:
         self._replace_all(records)
         logger.info("Wrote %d product embeddings to Postgres", len(records))
         return records
-
-    def load_index(self) -> list[ProductRecord]:
-        """Load the current Postgres-backed index into memory.
-
-        Returns:
-            The list of `ProductRecord` currently stored in the
-            `products` table. Returns an empty list (rather than
-            raising) if the table has no rows yet, so the API can
-            start up before the catalog has been indexed for the
-            first time.
-        """
-        with self._db_pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT sku, name, price, category, color, image_path, embedding "
-                "FROM products ORDER BY sku"
-            ).fetchall()
-
-        if not rows:
-            logger.warning(
-                "No products indexed yet. Run 'python scripts/build_embeddings.py' to build the index."
-            )
-            return []
-
-        return [
-            ProductRecord(
-                sku=row[0],
-                name=row[1],
-                price=row[2],
-                category=row[3],
-                color=row[4],
-                image_path=row[5],
-                embedding=[float(value) for value in row[6]],
-            )
-            for row in rows
-        ]
 
     def _replace_all(self, records: list[ProductRecord]) -> None:
         """Atomically swap the whole `products` table for `records`."""

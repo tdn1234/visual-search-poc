@@ -1,16 +1,16 @@
 """HTTP API layer for filtering the catalog by category and/or color.
 
-Responsibility: exact-metadata filtering over the in-memory catalog.
-This is deliberately separate from `api/search.py` -- there's no
-image involved and no embedding/similarity math, just a plain filter
-over fields already sitting in `ProductRecord`.
+Responsibility: exact-metadata filtering, run as a SQL query against
+Postgres. This is deliberately separate from `api/search.py` -- there's
+no image involved and no embedding/similarity math, just a plain
+`WHERE` filter over columns already in the `products` table.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Query, Request
 
-from app.schemas.search import ProductListResponse, ProductSummary
+from app.schemas.search import ProductListResponse
 
 router = APIRouter(tags=["products"])
 
@@ -29,8 +29,9 @@ async def list_products(
     returns the whole catalog.
 
     Args:
-        request: The FastAPI request, used to reach the in-memory
-            catalog stored on `app.state` (set up once at startup).
+        request: The FastAPI request, used to reach the
+            `ProductQueryService` stored on `app.state` (set up once
+            at startup).
         category: If given, only return products in this category.
         color: If given, only return products with this color.
 
@@ -38,13 +39,6 @@ async def list_products(
         A `ProductListResponse` listing every matching product (no
         embeddings, no ranking/score -- this is a plain filter).
     """
-    catalog = request.app.state.catalog
-
-    results = [
-        ProductSummary(sku=product.sku, name=product.name, price=product.price,
-                        category=product.category, color=product.color)
-        for product in catalog
-        if (category is None or product.category.lower() == category.lower())
-        and (color is None or (product.color is not None and product.color.lower() == color.lower()))
-    ]
+    product_query_service = request.app.state.product_query_service
+    results = product_query_service.list_products(category=category, color=color)
     return ProductListResponse(results=results)

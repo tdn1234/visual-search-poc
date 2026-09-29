@@ -3,8 +3,9 @@
 Responsibility: figure out "what category/color is *in* this uploaded
 photo". Powers the `match_category`/`match_color` checkboxes on
 `POST /search` -- a separate concern from the color adapter (which
-only re-ranks results) and from `catalog_filter` (which applies
-whatever label this service predicts).
+only re-ranks results) and from `ProductQueryService.search_similar`
+(which applies whatever label this service predicts, as a SQL `WHERE`
+clause).
 
 Category and color use different techniques, because plain zero-shot
 CLIP classification turned out unreliable for category on this

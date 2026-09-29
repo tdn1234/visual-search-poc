@@ -52,10 +52,9 @@ visual-search-poc/
 │   │   │   └── category_classifier.py  # trained category-classification head + loader
 │   │   ├── services/
 │   │   │   ├── embedding_service.py     # bytes/file -> (adapted) embedding
-│   │   │   ├── similarity_service.py    # cosine similarity + ranking
-│   │   │   ├── indexing_service.py      # build/load the Postgres product index
-│   │   │   ├── attribute_classifier_service.py  # classify an uploaded image's category/color
-│   │   │   └── catalog_filter.py        # category/color filtering (AND for /products, OR for /search)
+│   │   │   ├── indexing_service.py      # write path: catalog/ -> Postgres `products` table
+│   │   │   ├── product_query_service.py # read path: pgvector search + metadata filter, per request
+│   │   │   └── attribute_classifier_service.py  # classify an uploaded image's category/color
 │   │   ├── api/
 │   │   │   ├── search.py            # POST /search route
 │   │   │   └── products.py          # GET /products route
@@ -163,12 +162,13 @@ vectors have all 512 values).
 The table is **generated**, never hand-edited — run
 `build_embeddings.py` to (re)build it. Each run `TRUNCATE`s and
 re-inserts the whole catalog, so it's safe to re-run any time products,
-photos, or the color adapter change. Ranking itself (`SimilarityService`)
-still happens in Python, over the catalog loaded into memory at
-startup — pgvector here replaces the old `embeddings.json` flat file
-as the durable, restart-proof store, and its HNSW index is what a
-larger catalog would query directly instead of loading everything into
-memory.
+photos, or the color adapter change. Ranking itself happens **in SQL**:
+`ProductQueryService.search_similar` runs one query per request
+(`... ORDER BY embedding <=> $query LIMIT 5`), which pgvector answers
+using the `products_embedding_idx` HNSW index -- the catalog is never
+loaded into the API process at all, so this scales to a catalog far
+bigger than would fit comfortably in memory without any change to the
+Python code above it.
 
 ## Option A: Docker (recommended for first run)
 
@@ -598,8 +598,9 @@ curl -X POST "http://127.0.0.1:8010/search?match_category=true&match_color=true"
 Passing both is **OR** (widens rather than narrows — the opposite of
 `/products`, deliberately: narrowing to AND here would mean neither
 filter alone could ever broaden a search). See the docstring on
-`search_by_image` in `app/api/search.py`, and `catalog_filter.py` for
-where the AND/OR split actually lives.
+`search_by_image` in `app/api/search.py`, and `product_query_service.py`
+for where the AND/OR split actually lives (two different `WHERE`
+clauses built by `list_products` vs. `search_similar`).
 
 ## Testing the API
 
@@ -692,12 +693,11 @@ curl http://127.0.0.1:8000/health   # or :8010 for Docker
 - **V2 (this POC):** CLIP + PostgreSQL with the `pgvector` extension
   (see [Product index storage](#product-index-storage-postgres--pgvector)).
   Replaces the JSON file with a `products` table and an HNSW ANN index,
-  run as a `db` service in `docker-compose.yml`. `IndexingService` is
-  now DB-backed (`app/db.py`), but ranking itself still happens
-  in-memory over the catalog loaded at startup — fine up to a few
-  hundred products; a larger catalog would push the `ORDER BY embedding
-  <=> query` ranking into the SQL query itself instead of loading
-  everything into memory.
+  run as a `db` service in `docker-compose.yml`. Writes go through
+  `IndexingService` (offline, via `build_embeddings.py`); reads go
+  through `ProductQueryService`, which runs an actual SQL query per
+  request (`ORDER BY embedding <=> $query LIMIT k`, answered by the
+  HNSW index) -- the catalog is never loaded into the API process.
 - **V3:** Magento 2 module integration. A Magento observer/cron pushes
   product images to this service on save; a Magento block/API calls
   `/search` from the storefront (e.g. a "search by image" widget) and

@@ -1,8 +1,9 @@
 """HTTP API layer for visual search.
 
 Responsibility: parse/validate the HTTP request, delegate all real
-work to services (embedding + similarity), and shape the response.
-No business logic (CLIP calls, cosine similarity math) lives here.
+work to services (embedding + attribute classification + the
+Postgres/pgvector query), and shape the response. No business logic
+(CLIP calls, SQL) lives here.
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from PIL import Image
 
 from app.config import TOP_K_RESULTS
 from app.schemas.search import SearchResponse
-from app.services.catalog_filter import filter_by_category_or_color
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,10 @@ async def search_by_image(
     """Find the top-K most visually similar products to an uploaded image.
 
     Pipeline: uploaded image bytes -> CLIP embedding -> (optional
-    category/color classification + filter) -> cosine similarity
-    against the indexed catalog -> top-K ranked results.
+    category/color classification) -> a single pgvector nearest-
+    neighbor SQL query (optionally restricted by the classified
+    category/color) -> top-K ranked results. The candidate pool is
+    never loaded into Python; Postgres does the ranking.
 
     `match_category`/`match_color` don't take a value -- checking one
     means "classify the *uploaded image itself* against the
@@ -81,11 +83,10 @@ async def search_by_image(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
 
     embedding_service = request.app.state.embedding_service
-    similarity_service = request.app.state.similarity_service
+    product_query_service = request.app.state.product_query_service
     attribute_classifier_service = request.app.state.attribute_classifier_service
-    catalog = request.app.state.catalog
 
-    if not catalog:
+    if product_query_service.count() == 0:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Product catalog is empty. Run 'python scripts/build_embeddings.py' "
@@ -97,26 +98,24 @@ async def search_by_image(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
-    candidates = catalog
+    predicted_category: str | None = None
+    predicted_color: str | None = None
     if match_category or match_color:
         image = Image.open(io.BytesIO(image_bytes))  # already validated by embed_image_bytes above
         image.load()
 
-        category_labels = sorted({p.category for p in catalog}) if match_category else None
-        color_labels = sorted({p.color for p in catalog if p.color}) if match_color else None
+        category_labels = product_query_service.distinct_categories() if match_category else None
+        color_labels = product_query_service.distinct_colors() if match_color else None
         predicted_category, predicted_color = attribute_classifier_service.classify(
             image, category_labels=category_labels, color_labels=color_labels
         )
 
-        candidates = filter_by_category_or_color(catalog, category=predicted_category, color=predicted_color)
-        if not candidates:
-            return SearchResponse(results=[])
-
     try:
-        results = similarity_service.rank_products(
+        results = product_query_service.search_similar(
             query_embedding=query_embedding,
-            catalog=candidates,
             top_k=TOP_K_RESULTS,
+            category=predicted_category,
+            color=predicted_color,
         )
     except Exception as exc:  # noqa: BLE001 - last-resort safety net for the API layer
         logger.exception("Unexpected error while ranking products")

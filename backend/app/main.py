@@ -1,8 +1,11 @@
 """FastAPI application entry point.
 
 Responsibility: create the FastAPI app, load the (heavy) CLIP model
-and the product index exactly once at startup, store them on
-`app.state`, and register API routes.
+exactly once at startup, open the Postgres connection pool, store them
+on `app.state`, and register API routes. The product catalog itself is
+*not* loaded here -- every request queries Postgres directly (see
+`ProductQueryService`), so this module only owns things that are
+genuinely expensive to set up per-request (the ML models, the DB pool).
 
 Run with:
     uvicorn app.main:app --reload
@@ -25,8 +28,7 @@ from app.models.clip_model import ClipModel
 from app.models.color_adapter import load_color_adapter
 from app.services.attribute_classifier_service import AttributeClassifierService
 from app.services.embedding_service import EmbeddingService
-from app.services.indexing_service import IndexingService
-from app.services.similarity_service import SimilarityService
+from app.services.product_query_service import ProductQueryService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -34,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Load the ML model and product catalog once, before serving requests.
+    """Load the ML models and open the DB pool once, before serving requests.
 
     Loading CLIP takes a few seconds and must not happen per-request,
     so it lives here and the resulting objects are attached to
@@ -49,21 +51,17 @@ async def lifespan(app: FastAPI):
     category_classifier = load_category_classifier(CATEGORY_CLASSIFIER_FILE)
 
     embedding_service = EmbeddingService(clip_model=clip_model, color_adapter=color_adapter)
-    indexing_service = IndexingService(embedding_service=embedding_service, db_pool=db_pool)
-    similarity_service = SimilarityService()
+    product_query_service = ProductQueryService(db_pool=db_pool)
     attribute_classifier_service = AttributeClassifierService(
         clip_model=clip_model, category_classifier=category_classifier
     )
 
-    catalog = indexing_service.load_index()
-    logger.info("Loaded %d products from Postgres", len(catalog))
+    logger.info("%d products currently indexed in Postgres", product_query_service.count())
 
     app.state.db_pool = db_pool
     app.state.embedding_service = embedding_service
-    app.state.indexing_service = indexing_service
-    app.state.similarity_service = similarity_service
+    app.state.product_query_service = product_query_service
     app.state.attribute_classifier_service = attribute_classifier_service
-    app.state.catalog = catalog
 
     yield
 
