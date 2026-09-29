@@ -134,9 +134,11 @@ loaded.
 | Service | `app/services/indexing_service.py` | **Write path.** Knows the catalog folder layout and the Postgres `products` table schema. Scans `catalog/`, embeds every image, and replaces the table (run offline, by `scripts/build_embeddings.py`, never by the API). |
 | Service | `app/services/product_query_service.py` | **Read path.** Every SQL query `/search` and `/products` need: pgvector nearest-neighbor search (`search_similar`, category/color OR-filtered), plain metadata filtering (`list_products`, AND), and small helper queries (`count`, `distinct_categories`, `distinct_colors`). No caching, no in-memory catalog -- every call hits Postgres. |
 | Infra | `app/db.py` | Owns the psycopg connection pool, registers pgvector's Python adapter, and ensures the `vector` extension/`products` table/HNSW index exist. The only module that imports psycopg. |
-| API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. |
-| API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. |
-| Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
+| Infra | `app/auth.py` | `require_api_key`, a FastAPI dependency checking the `X-API-Key` header against `API_KEY`. Applied at the router level in `api/search.py`/`api/products.py`, not per-route. |
+| Infra | `app/rate_limit.py` | The single Redis-backed `slowapi` `Limiter` instance, keyed by client IP. Endpoints import it to set their own `@limiter.limit(...)`; `main.py` wires the shared exception handler/middleware once. |
+| API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a 20/minute limit (CLIP inference is the expensive part). |
+| API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. Router-level auth + a looser 60/minute limit. |
+| Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit exception handler/middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
 | Script | `scripts/train_color_adapter.py` | CLI entrypoint for the offline color-adapter-training flow. |
@@ -160,6 +162,46 @@ category/color get predicted for an uploaded image (zero-shot vs.
 trained classifier) — `api/search.py` just gets back two optional
 strings and passes them straight through to
 `ProductQueryService.search_similar` as SQL filter arguments.
+
+## Auth and rate limiting
+
+Both are cross-cutting concerns applied at the *router* level, not
+per-route, so individual endpoint functions in `api/search.py`/
+`api/products.py` stay focused on their own logic:
+
+- **Auth** (`app/auth.py`): `APIRouter(..., dependencies=[Depends(require_api_key)])`
+  runs `require_api_key` before every route on that router. It's a
+  single shared-secret check (`X-API-Key` header == `API_KEY`) — no
+  user accounts, no token issuance/expiry, since every caller is a
+  trusted service (this POC has no concept of "logged in as a
+  particular user"). Declared via `fastapi.security.APIKeyHeader`
+  rather than a manual header read so FastAPI also registers it as a
+  proper OpenAPI security scheme (the "Authorize" button in `/docs`).
+
+- **Rate limiting** (`app/rate_limit.py`): one `slowapi.Limiter`,
+  keyed by client IP (not by API key -- with one shared key, keying by
+  it would bucket every caller together instead of limiting each one).
+  It's backed by Redis (`storage_uri=REDIS_URL`) rather than
+  in-process memory for the same reason storage moved to Postgres
+  earlier: a counter that only lives in one worker's memory stops
+  being a real limit the moment there's more than one worker/replica.
+  `main.py` registers the shared exception handler
+  (`RateLimitExceeded` -> 429) and `SlowAPIMiddleware` once, at app
+  creation; each route then declares its own limit with
+  `@limiter.limit("20/minute")`, since `/search` (CLIP inference) and
+  `/products` (a SQL filter) warrant different limits.
+
+One implementation wrinkle worth noting: `api/search.py` and
+`api/products.py` deliberately do **not** use
+`from __future__ import annotations` (unlike the rest of this
+codebase). With that import active, all type annotations become
+strings (PEP 563), and `@limiter.limit(...)`'s wrapping of the
+endpoint function breaks FastAPI's ability to resolve
+`ForwardRef('UploadFile')` back to the real `UploadFile` class at
+import time -- `from __future__ import annotations` and slowapi's
+decorator-based API don't compose cleanly through FastAPI's route
+introspection. Every other module keeps the future import; only these
+two routers omit it.
 
 ## Similarity ranking, step by step
 

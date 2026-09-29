@@ -24,6 +24,9 @@ just ranking by overall similarity — a plain metadata filter
 on the image search itself
 ([`match_category`/`match_color`](#matching-the-uploaded-images-own-categorycolor)).
 
+Every endpoint except `/health` requires an API key and is rate-limited
+— see [Authentication & rate limiting](#authentication--rate-limiting).
+
 ## Quick start
 
 Two ways to run this. Docker is the least fiddly (no local Python/venv
@@ -59,6 +62,8 @@ visual-search-poc/
 │   │   │   ├── search.py            # POST /search route
 │   │   │   └── products.py          # GET /products route
 │   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
+│   │   ├── auth.py                  # X-API-Key header check (require_api_key)
+│   │   ├── rate_limit.py            # Redis-backed slowapi Limiter instance
 │   │   └── schemas/
 │   │       └── search.py            # Pydantic request/response models
 │   ├── scripts/
@@ -179,15 +184,17 @@ Python code above it.
 > All commands below assume you're inside `visual-search-poc/` (the
 > project root, where `docker-compose.yml` lives).
 
-`docker-compose.yml` defines three services: `db` (`pgvector/pgvector:pg16`,
+`docker-compose.yml` defines four services: `db` (`pgvector/pgvector:pg16`,
 the product index), `adminer` (a lightweight DB dashboard for poking at
-`db`), and `backend` (this API). The API is exposed on **host port
-8010** (mapped to port 8000 inside the container) so it doesn't clash
-with anything already using 8000 on your machine; Postgres is exposed
-on **host port 5433** (mapped to 5432) so it doesn't clash with a
-Postgres you might already have running locally; Adminer is exposed on
-**host port 8081**. Edit the `ports:` lines in `docker-compose.yml` if
-you want different host ports.
+`db`), `redis` (backs the request rate limiter), and `backend` (this
+API). The API is exposed on **host port 8010** (mapped to port 8000
+inside the container) so it doesn't clash with anything already using
+8000 on your machine; Postgres is exposed on **host port 5433**
+(mapped to 5432) so it doesn't clash with a Postgres you might already
+have running locally; Adminer is exposed on **host port 8081**; Redis
+is exposed on **host port 6380** (mapped to 6379), same reasoning as
+Postgres. Edit the `ports:` lines in `docker-compose.yml` if you want
+different host ports.
 
 ### 1. Build the image
 
@@ -271,39 +278,50 @@ port 8081 to the open internet as-is.
 
 | Symptom | Fix |
 |---|---|
-| `port is already allocated` | Something else on your host is using port 8010, 5433, or 8081. Change the host-side port in `docker-compose.yml`'s `ports:` (e.g. `"8020:8000"`, `"5434:5432"`, or `"8082:8080"`). |
+| `port is already allocated` | Something else on your host is using port 8010, 5433, 8081, or 6380. Change the host-side port in `docker-compose.yml`'s `ports:` (e.g. `"8020:8000"`, `"5434:5432"`, `"8082:8080"`, or `"6381:6379"`). |
 | Build hangs/times out downloading torch | Slow network — just retry `docker-compose build`; pip resumes from cache where possible. |
 | `backend` exits/restarts immediately, logs show a Postgres connection error | `db` isn't healthy yet — `docker-compose up -d db` first and wait for `docker-compose ps` to show `(healthy)`, or just re-run `docker-compose up` (the `depends_on` health check should handle this automatically). |
 | `/search` returns 503 "Catalog not indexed yet" | You skipped step 3, or the `products` table is empty — run the `build_embeddings.py` one-off command above. |
 
 ## Option B: Local Python setup
 
-> Requires Python 3.12 (3.10+ also works) and a reachable Postgres
-> with the `pgvector` extension available. All commands below assume
-> you're inside `visual-search-poc/backend/`.
+> Requires Python 3.12 (3.10+ also works), a reachable Postgres with
+> the `pgvector` extension available, and a reachable Redis. All
+> commands below assume you're inside `visual-search-poc/backend/`.
 
-### 0. Start Postgres
+### 0. Start Postgres and Redis
 
 Easiest path even for "local" development: let Docker run just the
-`db` service (from the project root, `visual-search-poc/`), and run
-everything else natively:
+`db` and `redis` services (from the project root, `visual-search-poc/`),
+and run everything else natively:
 
 ```bash
-docker-compose up -d db
+docker-compose up -d db redis
 ```
 
-This listens on `localhost:5433`, which is `app/config.py`'s default
-`DATABASE_URL` — no extra setup needed. Point at a different Postgres
-by setting `DATABASE_URL` yourself, e.g.:
+These listen on `localhost:5433` and `localhost:6380`, which are
+`app/config.py`'s defaults for `DATABASE_URL`/`REDIS_URL` — no extra
+setup needed. Point at different instances by setting those env vars
+yourself, e.g.:
 
 ```bash
 export DATABASE_URL="postgresql://user:pass@localhost:5432/visual_search"
+export REDIS_URL="redis://localhost:6379/0"
 ```
 
-(it must have the `vector` extension installed — the `pgvector/pgvector`
-Docker image already includes it; a self-managed Postgres needs
-`CREATE EXTENSION vector` permissions and the extension's files
-present, see [pgvector's install docs](https://github.com/pgvector/pgvector#installation)).
+(Postgres must have the `vector` extension installed — the
+`pgvector/pgvector` Docker image already includes it; a self-managed
+Postgres needs `CREATE EXTENSION vector` permissions and the
+extension's files present, see
+[pgvector's install docs](https://github.com/pgvector/pgvector#installation)).
+
+You'll also want to set `API_KEY` (see
+[Authentication & rate limiting](#authentication--rate-limiting)) —
+otherwise the app falls back to the default dev key and logs a warning:
+
+```bash
+export API_KEY="some-key-only-you-know"
+```
 
 ### 1. Create and activate a virtual environment
 
@@ -567,7 +585,8 @@ No image involved — just filters the catalog's `category`/`color`
 metadata fields, exact and case-insensitive:
 
 ```bash
-curl "http://127.0.0.1:8010/products?category=Shoes&color=red"
+curl -H "X-API-Key: dev-api-key-change-me" \
+  "http://127.0.0.1:8010/products?category=Shoes&color=red"
 ```
 
 Passing both filters is **AND** (narrows to items matching both — e.g.
@@ -587,10 +606,12 @@ items sharing that prediction:
 
 ```bash
 curl -X POST "http://127.0.0.1:8010/search?match_color=true" \
+  -H "X-API-Key: dev-api-key-change-me" \
   -F "file=@catalog/shoe-red/image.jpg;type=image/jpeg"
 # every result is guaranteed red
 
 curl -X POST "http://127.0.0.1:8010/search?match_category=true&match_color=true" \
+  -H "X-API-Key: dev-api-key-change-me" \
   -F "file=@catalog/shoe-red/image.jpg;type=image/jpeg"
 # every result is a shoe, or red, or both
 ```
@@ -612,6 +633,7 @@ clauses built by `list_products` vs. `search_similar`).
 ```bash
 curl -X POST "http://127.0.0.1:8000/search" \
   -H "accept: application/json" \
+  -H "X-API-Key: dev-api-key-change-me" \
   -F "file=@catalog/shoe-red/image.jpg;type=image/jpeg"
 # Docker users: replace 8000 with 8010
 ```
@@ -620,9 +642,10 @@ curl -X POST "http://127.0.0.1:8000/search" \
 
 1. Method: `POST`
 2. URL: `http://127.0.0.1:8000/search` (or `:8010` for Docker)
-3. Body → `form-data`
-4. Key: `file`, type `File`, value: pick any product photo
-5. Send
+3. Headers → `X-API-Key: dev-api-key-change-me` (or whatever you set `API_KEY` to)
+4. Body → `form-data`
+5. Key: `file`, type `File`, value: pick any product photo
+6. Send
 
 ### Expected response
 
@@ -672,10 +695,66 @@ curl http://127.0.0.1:8000/health   # or :8010 for Docker
 # {"status":"ok"}
 ```
 
+`/health` is the one endpoint that needs no API key and isn't
+rate-limited — it's what `docker-compose`/an orchestrator would poll,
+and gating that on the same key that guards real data would make
+liveness checks a secret-management problem for no benefit.
+
+## Authentication & rate limiting
+
+Every route except `/health` requires an `X-API-Key` header
+(`app/auth.py`) and is rate-limited per client IP via Redis
+(`app/rate_limit.py`, using [`slowapi`](https://github.com/laurentS/slowapi)):
+
+| Endpoint | Limit | Why |
+|---|---|---|
+| `POST /search` | 20/minute | Runs CLIP inference (the expensive part) plus a DB query. |
+| `GET /products` | 60/minute | Plain SQL filter, no ML involved — cheap enough for a looser limit. |
+
+**Setting the key:** `docker-compose.yml` sets `API_KEY=dev-api-key-change-me`
+for local use. **Change it** before running this anywhere reachable by
+anyone but you — `main.py` logs a startup warning if it detects the
+default is still in use. For local Python (Option B), set it yourself:
+
+```bash
+export API_KEY="some-key-only-you-know"
+```
+
+**Sending it:** every `/search`/`/products` call needs the header:
+
+```bash
+curl -H "X-API-Key: <your key>" "http://127.0.0.1:8010/products"
+```
+
+Swagger UI at `/docs` also has an **Authorize** button (top right) —
+paste the key in once and every "Try it out" call in the browser sends
+it automatically.
+
+**Missing/wrong key** → `401 Unauthorized`:
+
+```json
+{"detail":"Missing or invalid API key. Send it as the 'X-API-Key' header."}
+```
+
+**Over the limit** → `429 Too Many Requests`:
+
+```json
+{"error":"Rate limit exceeded: 20 per 1 minute"}
+```
+
+Limits are counted **per client IP**, not per API key — this POC has
+exactly one shared key, so keying by it would put every caller in the
+same bucket instead of limiting each one individually. Counters live
+in Redis with a self-expiring TTL matching the window (a minute), so
+nothing needs manual cleanup; restarting the `redis` container/service
+simply resets everyone's count to zero.
+
 ## Error handling
 
 | Situation | HTTP status | Detail |
 |---|---|---|
+| Missing/invalid `X-API-Key` header | 401 | Missing or invalid API key |
+| Rate limit exceeded | 429 | Rate limit exceeded: `<limit>` |
 | Non-image file uploaded | 400 | Unsupported file type |
 | Empty file uploaded | 400 | Uploaded file is empty |
 | Corrupted/unreadable image | 400 | Could not encode image with CLIP |

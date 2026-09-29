@@ -30,3 +30,7 @@ pydantic==2.9.2
 psycopg[binary]==3.2.3
 psycopg-pool==3.2.3
 pgvector==0.3.6
+
+# --- Auth & rate limiting ---
+slowapi==0.1.9
+redis==5.0.8

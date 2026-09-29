@@ -4,27 +4,39 @@ Responsibility: parse/validate the HTTP request, delegate all real
 work to services (embedding + attribute classification + the
 Postgres/pgvector query), and shape the response. No business logic
 (CLIP calls, SQL) lives here.
-"""
 
-from __future__ import annotations
+Every route on this router requires the `X-API-Key` header
+(`require_api_key`, applied at the router level) and is rate-limited
+per client IP (`app.rate_limit.limiter`) -- CLIP inference is the most
+expensive thing this service does, so `/search` gets a tighter limit
+than the plain metadata endpoint in `api/products.py`.
+
+No `from __future__ import annotations` in this module deliberately --
+slowapi's `@limiter.limit(...)` wraps the endpoint function, and with
+deferred (string) annotations FastAPI fails to resolve `UploadFile` as
+a forward reference through that wrapper at import time.
+"""
 
 import io
 import logging
 
-from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from PIL import Image
 
+from app.auth import require_api_key
 from app.config import TOP_K_RESULTS
+from app.rate_limit import limiter
 from app.schemas.search import SearchResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["search"])
+router = APIRouter(tags=["search"], dependencies=[Depends(require_api_key)])
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 @router.post("/search", response_model=SearchResponse)
+@limiter.limit("20/minute")
 async def search_by_image(
     request: Request,
     file: UploadFile = File(...),
@@ -66,6 +78,10 @@ async def search_by_image(
         candidates.
 
     Raises:
+        HTTPException 401: If the request is missing a valid
+            `X-API-Key` header (see `app.auth.require_api_key`).
+        HTTPException 429: If the caller has exceeded 20 requests/minute
+            (see `app.rate_limit`).
         HTTPException 400: If the uploaded file is missing/empty/not
             a supported image type.
         HTTPException 503: If the product catalog has not been

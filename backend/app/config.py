@@ -32,6 +32,19 @@ DATABASE_URL: str = os.environ.get(
     "DATABASE_URL", "postgresql://postgres:postgres@localhost:5433/visual_search"
 )
 
+# --- Auth & rate limiting ---------------------------------------------------
+# Single shared-secret API key (no user accounts in this POC) -- sent by
+# clients as the `X-API-Key` header, checked by `app.auth.require_api_key`.
+# The default below only works for local/dev use; always override it via
+# the `API_KEY` env var (docker-compose does) before exposing this
+# anywhere other than your own machine.
+API_KEY: str = os.environ.get("API_KEY", "dev-api-key-change-me")
+
+# Redis backs the request-rate limiter (`slowapi`) so limits are shared
+# across all backend replicas, not just tracked per-process. Default
+# matches docker-compose's `redis` service host port mapping (6380:6379).
+REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6380/0")
+
 # --- Search configuration ---------------------------------------------------
 TOP_K_RESULTS: int = 5
 

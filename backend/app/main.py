@@ -1,11 +1,12 @@
 """FastAPI application entry point.
 
 Responsibility: create the FastAPI app, load the (heavy) CLIP model
-exactly once at startup, open the Postgres connection pool, store them
-on `app.state`, and register API routes. The product catalog itself is
-*not* loaded here -- every request queries Postgres directly (see
-`ProductQueryService`), so this module only owns things that are
-genuinely expensive to set up per-request (the ML models, the DB pool).
+exactly once at startup, open the Postgres connection pool, wire up
+auth/rate-limiting, store everything on `app.state`, and register API
+routes. The product catalog itself is *not* loaded here -- every
+request queries Postgres directly (see `ProductQueryService`), so this
+module only owns things that are genuinely expensive to set up
+per-request (the ML models, the DB pool).
 
 Run with:
     uvicorn app.main:app --reload
@@ -18,20 +19,26 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 
 from app.api.products import router as products_router
 from app.api.search import router as search_router
-from app.config import CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE
+from app.config import API_KEY, CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE
 from app.db import create_pool
 from app.models.category_classifier import load_category_classifier
 from app.models.clip_model import ClipModel
 from app.models.color_adapter import load_color_adapter
+from app.rate_limit import limiter
 from app.services.attribute_classifier_service import AttributeClassifierService
 from app.services.embedding_service import EmbeddingService
 from app.services.product_query_service import ProductQueryService
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+
+_DEFAULT_API_KEY = "dev-api-key-change-me"
 
 
 @asynccontextmanager
@@ -42,6 +49,12 @@ async def lifespan(app: FastAPI):
     so it lives here and the resulting objects are attached to
     `app.state` for the API routes to reuse.
     """
+    if API_KEY == _DEFAULT_API_KEY:
+        logger.warning(
+            "Using the default dev API key. Set the API_KEY env var before exposing "
+            "this service beyond your own machine."
+        )
+
     logger.info("Starting up: connecting to Postgres...")
     db_pool = create_pool()
 
@@ -75,6 +88,10 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.include_router(search_router)
 app.include_router(products_router)

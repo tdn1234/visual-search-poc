@@ -31,6 +31,21 @@ services:
       db:
         condition: service_healthy
 
+  redis:
+    image: redis:7-alpine
+    container_name: visual-search-redis
+    ports:
+      # Host port 6380 (not 6379) so this doesn't collide with a Redis
+      # instance you might already have running locally.
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No volume: rate-limit counters are short-lived and fine to lose
+    # on restart -- this isn't a cache/queue that needs durability.
+
   backend:
     build:
       context: .
@@ -41,8 +56,14 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/visual_search
+      - REDIS_URL=redis://redis:6379/0
+      # Dev-only default -- override this before exposing the API beyond
+      # your own machine (main.py logs a warning at startup if you don't).
+      - API_KEY=dev-api-key-change-me
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     volumes:
       # Live-reload app/script code without rebuilding the image.
