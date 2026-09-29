@@ -18,6 +18,7 @@ annotations don't resolve cleanly through FastAPI's route introspection).
 from fastapi import APIRouter, Depends, Query, Request
 
 from app.auth import require_api_key
+from app.config import PRODUCTS_RATE_LIMIT
 from app.rate_limit import limiter
 from app.schemas.search import ProductListResponse
 
@@ -25,7 +26,7 @@ router = APIRouter(tags=["products"], dependencies=[Depends(require_api_key)])
 
 
 @router.get("/products", response_model=ProductListResponse)
-@limiter.limit("60/minute")
+@limiter.limit(PRODUCTS_RATE_LIMIT)
 async def list_products(
     request: Request,
     category: str | None = Query(None, description="Exact category match, e.g. 'Shoes'."),
@@ -52,7 +53,7 @@ async def list_products(
     Raises:
         HTTPException 401: If the request is missing a valid
             `X-API-Key` header.
-        HTTPException 429: If the caller has exceeded 60 requests/minute.
+        HTTPException 429: If the caller has exceeded `PRODUCTS_RATE_LIMIT`.
     """
     product_query_service = request.app.state.product_query_service
     results = product_query_service.list_products(category=category, color=color)

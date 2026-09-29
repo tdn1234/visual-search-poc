@@ -60,6 +60,10 @@ services:
       # Dev-only default -- override this before exposing the API beyond
       # your own machine (main.py logs a warning at startup if you don't).
       - API_KEY=dev-api-key-change-me
+      # Uncomment to override the per-endpoint rate limits (defaults set
+      # in app/config.py: SEARCH_RATE_LIMIT=20/minute, PRODUCTS_RATE_LIMIT=60/minute).
+      # - SEARCH_RATE_LIMIT=20/minute
+      # - PRODUCTS_RATE_LIMIT=60/minute
     depends_on:
       db:
         condition: service_healthy

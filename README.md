@@ -706,10 +706,23 @@ Every route except `/health` requires an `X-API-Key` header
 (`app/auth.py`) and is rate-limited per client IP via Redis
 (`app/rate_limit.py`, using [`slowapi`](https://github.com/laurentS/slowapi)):
 
-| Endpoint | Limit | Why |
-|---|---|---|
-| `POST /search` | 20/minute | Runs CLIP inference (the expensive part) plus a DB query. |
-| `GET /products` | 60/minute | Plain SQL filter, no ML involved — cheap enough for a looser limit. |
+| Endpoint | Default limit | Env var to override | Why |
+|---|---|---|---|
+| `POST /search` | 20/minute | `SEARCH_RATE_LIMIT` | Runs CLIP inference (the expensive part) plus a DB query. |
+| `GET /products` | 60/minute | `PRODUCTS_RATE_LIMIT` | Plain SQL filter, no ML involved — cheap enough for a looser limit. |
+
+Both live in `app/config.py` (env-overridable, same pattern as
+`API_KEY`/`DATABASE_URL`), in [`limits`-library syntax](https://limits.readthedocs.io/en/stable/quickstart.html#rate-limit-string-notation)
+(`"<count>/<second|minute|hour|day>"`). To change one without touching
+code:
+
+```bash
+# docker-compose: uncomment/edit the matching line in docker-compose.yml, then
+docker-compose up -d backend
+
+# local Python:
+export SEARCH_RATE_LIMIT="50/minute"
+```
 
 **Setting the key:** `docker-compose.yml` sets `API_KEY=dev-api-key-change-me`
 for local use. **Change it** before running this anywhere reachable by

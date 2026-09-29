@@ -136,8 +136,8 @@ loaded.
 | Infra | `app/db.py` | Owns the psycopg connection pool, registers pgvector's Python adapter, and ensures the `vector` extension/`products` table/HNSW index exist. The only module that imports psycopg. |
 | Infra | `app/auth.py` | `require_api_key`, a FastAPI dependency checking the `X-API-Key` header against `API_KEY`. Applied at the router level in `api/search.py`/`api/products.py`, not per-route. |
 | Infra | `app/rate_limit.py` | The single Redis-backed `slowapi` `Limiter` instance, keyed by client IP. Endpoints import it to set their own `@limiter.limit(...)`; `main.py` wires the shared exception handler/middleware once. |
-| API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a 20/minute limit (CLIP inference is the expensive part). |
-| API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. Router-level auth + a looser 60/minute limit. |
+| API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a `SEARCH_RATE_LIMIT` limit (CLIP inference is the expensive part). |
+| API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. Router-level auth + a looser `PRODUCTS_RATE_LIMIT`. |
 | Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit exception handler/middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
@@ -187,8 +187,10 @@ per-route, so individual endpoint functions in `api/search.py`/
   being a real limit the moment there's more than one worker/replica.
   `main.py` registers the shared exception handler
   (`RateLimitExceeded` -> 429) and `SlowAPIMiddleware` once, at app
-  creation; each route then declares its own limit with
-  `@limiter.limit("20/minute")`, since `/search` (CLIP inference) and
+  creation; each route then declares its own limit --
+  `@limiter.limit(SEARCH_RATE_LIMIT)` / `@limiter.limit(PRODUCTS_RATE_LIMIT)`,
+  both env-overridable constants in `app/config.py` (defaults
+  `"20/minute"`/`"60/minute"`) -- since `/search` (CLIP inference) and
   `/products` (a SQL filter) warrant different limits.
 
 One implementation wrinkle worth noting: `api/search.py` and

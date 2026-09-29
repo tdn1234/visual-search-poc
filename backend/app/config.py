@@ -45,6 +45,15 @@ API_KEY: str = os.environ.get("API_KEY", "dev-api-key-change-me")
 # matches docker-compose's `redis` service host port mapping (6380:6379).
 REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6380/0")
 
+# Per-client-IP limits, in `limits`-library syntax (e.g. "20/minute",
+# "100/hour", "5/second"). Applied via `@limiter.limit(...)` on each
+# route in api/search.py / api/products.py. Different endpoints get
+# different budgets: /search runs CLIP inference (expensive), /products
+# is a plain SQL filter (cheap) -- see docs/architecture.md's "Auth and
+# rate limiting" section for the reasoning.
+SEARCH_RATE_LIMIT: str = os.environ.get("SEARCH_RATE_LIMIT", "20/minute")
+PRODUCTS_RATE_LIMIT: str = os.environ.get("PRODUCTS_RATE_LIMIT", "60/minute")
+
 # --- Search configuration ---------------------------------------------------
 TOP_K_RESULTS: int = 5
 

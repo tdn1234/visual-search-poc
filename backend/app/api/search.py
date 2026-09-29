@@ -24,7 +24,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from PIL import Image
 
 from app.auth import require_api_key
-from app.config import TOP_K_RESULTS
+from app.config import SEARCH_RATE_LIMIT, TOP_K_RESULTS
 from app.rate_limit import limiter
 from app.schemas.search import SearchResponse
 
@@ -36,7 +36,7 @@ ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 
 @router.post("/search", response_model=SearchResponse)
-@limiter.limit("20/minute")
+@limiter.limit(SEARCH_RATE_LIMIT)
 async def search_by_image(
     request: Request,
     file: UploadFile = File(...),
@@ -80,8 +80,8 @@ async def search_by_image(
     Raises:
         HTTPException 401: If the request is missing a valid
             `X-API-Key` header (see `app.auth.require_api_key`).
-        HTTPException 429: If the caller has exceeded 20 requests/minute
-            (see `app.rate_limit`).
+        HTTPException 429: If the caller has exceeded `SEARCH_RATE_LIMIT`
+            (see `app.config`/`app.rate_limit`).
         HTTPException 400: If the uploaded file is missing/empty/not
             a supported image type.
         HTTPException 503: If the product catalog has not been
