@@ -1,17 +1,18 @@
-"""CLI script: build backend/data/embeddings.json from the product catalog.
+"""CLI script: build the Postgres/pgvector product index from the catalog.
 
-Usage (run from the `backend/` directory, with the venv active):
+Usage (run from the `backend/` directory, with the venv active, and
+Postgres reachable -- e.g. `docker compose up -d db`):
 
     python scripts/build_embeddings.py
 
 What it does:
     1. Scans `catalog/<sku>/` for an image + metadata.json per product.
     2. Loads CLIP once and computes one embedding per product image.
-    3. Writes the full result to backend/data/embeddings.json.
+    3. Replaces the `products` table in Postgres with the full result.
 
 This is meant to be re-run any time products are added, removed, or
-their photos change. The API only ever *reads* embeddings.json; it
-never regenerates it on its own.
+their photos change. The API only ever *reads* the `products` table;
+it never regenerates it on its own.
 """
 
 from __future__ import annotations
@@ -27,7 +28,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.config import CATALOG_DIR, COLOR_ADAPTER_FILE, EMBEDDINGS_FILE  # noqa: E402
+from app.config import CATALOG_DIR, COLOR_ADAPTER_FILE  # noqa: E402
+from app.db import create_pool  # noqa: E402
 from app.models.clip_model import ClipModel  # noqa: E402
 from app.models.color_adapter import load_color_adapter  # noqa: E402
 from app.services.embedding_service import EmbeddingService  # noqa: E402
@@ -42,7 +44,9 @@ def main() -> None:
     start_time = time.perf_counter()
 
     logger.info("Catalog directory: %s", CATALOG_DIR)
-    logger.info("Output file:       %s", EMBEDDINGS_FILE)
+
+    logger.info("Connecting to Postgres...")
+    db_pool = create_pool()
 
     logger.info("Loading CLIP model (this can take a while on first run, "
                 "since it downloads the model from Hugging Face)...")
@@ -50,16 +54,16 @@ def main() -> None:
     color_adapter = load_color_adapter(COLOR_ADAPTER_FILE)
 
     embedding_service = EmbeddingService(clip_model=clip_model, color_adapter=color_adapter)
-    indexing_service = IndexingService(embedding_service=embedding_service)
+    indexing_service = IndexingService(embedding_service=embedding_service, db_pool=db_pool)
 
     try:
-        records = indexing_service.build_index(
-            catalog_dir=CATALOG_DIR,
-            output_file=EMBEDDINGS_FILE,
-        )
+        records = indexing_service.build_index(catalog_dir=CATALOG_DIR)
     except (FileNotFoundError, ValueError) as exc:
         logger.error("Failed to build index: %s", exc)
+        db_pool.close()
         sys.exit(1)
+
+    db_pool.close()
 
     elapsed = time.perf_counter() - start_time
     logger.info("Done. Indexed %d products in %.1fs.", len(records), elapsed)

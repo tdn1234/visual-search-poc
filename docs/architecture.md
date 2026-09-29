@@ -12,7 +12,8 @@ Product image (catalog/<sku>/image.jpg)
  (optional) Color adapter (ColorAdapter, frozen-CLIP residual head)
         │  only applied if backend/data/color_adapter.pt exists
         ▼
- embeddings.json  (sku, name, price, category, color, embedding)
+ Postgres `products` table, pgvector VECTOR(512) column
+ (sku, name, price, category, color, image_path, embedding)
         │
         │   ... at query time ...
         │
@@ -44,7 +45,8 @@ why it exists and how it's trained. `match_category`/`match_color`
 filtering is also optional (off unless the query params are set) --
 see [Classifying and filtering an uploaded image](#classifying-and-filtering-an-uploaded-image)
 below. `GET /products` is a separate, simpler path: it never touches
-CLIP at all, just filters `embeddings.json`'s metadata directly.
+CLIP at all, just filters the in-memory catalog's metadata directly
+(itself loaded from Postgres once, at startup).
 
 ## Four separate flows
 
@@ -65,32 +67,37 @@ the same request:
 2. **Offline indexing** (`scripts/build_embeddings.py`) — run manually
    whenever the catalog changes (or after (re)training the color
    adapter). Scans `catalog/`, embeds every product photo once
-   (through the adapter too, if a checkpoint exists), and writes
-   `backend/data/embeddings.json`. This is the expensive step (loading
+   (through the adapter too, if a checkpoint exists), and replaces the
+   `products` table in Postgres (`TRUNCATE` + bulk insert, via
+   `IndexingService`/`app/db.py`). This is the expensive step (loading
    CLIP, running inference per image), but it happens outside the
    request/response cycle.
 
 3. **Online search** (`POST /search`, served by FastAPI) — the CLIP
    model (and color adapter / category classifier, if present) is
    loaded **once at API startup** (see `app/main.py`'s `lifespan`
-   handler) and kept in memory. Each request pays for encoding *one*
-   uploaded image, optionally classifying it (`match_category`/
-   `match_color`), and a cosine-similarity matrix multiply against the
-   (small, filtered-or-not) catalog — all fast enough for a laptop CPU.
+   handler), which also opens the Postgres connection pool and loads
+   the whole `products` table into an in-memory `list[ProductRecord]`.
+   Each request pays for encoding *one* uploaded image, optionally
+   classifying it (`match_category`/`match_color`), and a
+   cosine-similarity matrix multiply against the (small,
+   filtered-or-not) in-memory catalog — all fast enough for a laptop
+   CPU, and no per-request database round trip.
 
 4. **Online metadata browsing** (`GET /products`, served by FastAPI) —
-   no CLIP involved at all, just an in-memory filter over
-   `embeddings.json`'s `category`/`color` fields. The simplest and
-   fastest of the four flows.
+   no CLIP involved at all, just an in-memory filter over the loaded
+   catalog's `category`/`color` fields. The simplest and fastest of the
+   four flows.
 
 Keeping the offline flows separate from the online ones is what makes
-the JSON-file approach viable: the "database" (embeddings.json) is
-rebuilt in batch, and the API only ever reads it. It's also why flow 2
-must be re-run after flow 1 changes the color adapter checkpoint —
-otherwise the catalog's stored embeddings and freshly-adapted query
-embeddings would be in different (non-comparable) vector spaces. (The
-category classifier doesn't have this constraint -- it only classifies
-the *uploaded* image at query time, never touches stored catalog
+the "load the whole catalog into memory at startup" approach viable:
+the `products` table is rebuilt in batch by flow 2, and the API only
+ever reads it (once, at startup). It's also why flow 2 must be re-run
+after flow 1 changes the color adapter checkpoint — otherwise the
+catalog's stored embeddings and freshly-adapted query embeddings would
+be in different (non-comparable) vector spaces. (The category
+classifier doesn't have this constraint -- it only classifies the
+*uploaded* image at query time, never touches stored catalog
 embeddings, so retraining it takes effect immediately on API restart,
 no reindex needed.)
 
@@ -119,11 +126,12 @@ loaded.
 | Service | `app/services/embedding_service.py` | Turns raw bytes or a file path into an embedding, applying the color adapter (if loaded) after CLIP. Validates images. |
 | Service | `app/services/attribute_classifier_service.py` | Classifies an *uploaded* image's own category/color (zero-shot for color, `CategoryClassifier` for category) -- a different concern from ranking. |
 | Service | `app/services/catalog_filter.py` | Pure category/color matching over a list of `ProductRecord`. Two functions, AND and OR -- see below. |
-| Service | `app/services/indexing_service.py` | Knows the catalog folder layout and the embeddings.json schema. Builds and loads the index. |
+| Service | `app/services/indexing_service.py` | Knows the catalog folder layout and the Postgres `products` table schema. Builds (writes) and loads the index. |
 | Service | `app/services/similarity_service.py` | Pure ranking logic: cosine similarity + top-K sort. No I/O. |
+| Infra | `app/db.py` | Owns the psycopg connection pool, registers pgvector's Python adapter, and ensures the `vector` extension/`products` table/HNSW index exist. The only module that imports psycopg. |
 | API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. |
 | API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. |
-| Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`), exposes the FastAPI `app`. |
+| Entrypoint | `app/main.py` | Wires everything together once at startup (`lifespan`): opens the DB pool, loads models, loads the catalog into memory, exposes the FastAPI `app`. |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
 | Script | `scripts/train_color_adapter.py` | CLI entrypoint for the offline color-adapter-training flow. |
@@ -131,9 +139,11 @@ loaded.
 | Script | `scripts/import_real_photos.py` | Merges real, labeled photos (`backend/data/real_training/<Category>/`) into `training/manifest.json`, so the training scripts above see a mix of synthetic and real examples without any change to their own logic. |
 
 Each layer only talks to the layer directly below it, so, for example,
-swapping the storage format from JSON to PostgreSQL later only
-requires changing `IndexingService` — the API and model layers stay
-untouched. Likewise, `EmbeddingService` is the *only* place that knows
+the storage format moved from a JSON file to PostgreSQL/pgvector by
+changing only `IndexingService` (plus the new `app/db.py`) — the API
+and model layers, `SimilarityService`, and `catalog_filter` were
+untouched; they still just see a `list[ProductRecord]`. Likewise,
+`EmbeddingService` is the *only* place that knows
 whether a color adapter is active — everything downstream of it (the
 API route, `SimilarityService`) just sees embeddings and has no idea
 whether they came from raw CLIP or an adapted space. Symmetrically,

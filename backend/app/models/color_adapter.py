@@ -69,7 +69,7 @@ def load_color_adapter(checkpoint_file: Path) -> ColorAdapter | None:
     Returns `None` (rather than raising) when no checkpoint exists yet,
     so the app can start up and serve plain-CLIP search before anyone
     has run `scripts/train_color_adapter.py` -- consistent with how
-    `IndexingService.load_index` treats a missing embeddings.json.
+    `IndexingService.load_index` treats an empty `products` table.
 
     Args:
         checkpoint_file: Path to a `.pt` file saved by

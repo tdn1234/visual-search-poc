@@ -18,7 +18,8 @@ from fastapi import FastAPI
 
 from app.api.products import router as products_router
 from app.api.search import router as search_router
-from app.config import CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE, EMBEDDINGS_FILE
+from app.config import CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE
+from app.db import create_pool
 from app.models.category_classifier import load_category_classifier
 from app.models.clip_model import ClipModel
 from app.models.color_adapter import load_color_adapter
@@ -39,21 +40,25 @@ async def lifespan(app: FastAPI):
     so it lives here and the resulting objects are attached to
     `app.state` for the API routes to reuse.
     """
-    logger.info("Starting up: loading CLIP model...")
+    logger.info("Starting up: connecting to Postgres...")
+    db_pool = create_pool()
+
+    logger.info("Loading CLIP model...")
     clip_model = ClipModel()
     color_adapter = load_color_adapter(COLOR_ADAPTER_FILE)
     category_classifier = load_category_classifier(CATEGORY_CLASSIFIER_FILE)
 
     embedding_service = EmbeddingService(clip_model=clip_model, color_adapter=color_adapter)
-    indexing_service = IndexingService(embedding_service=embedding_service)
+    indexing_service = IndexingService(embedding_service=embedding_service, db_pool=db_pool)
     similarity_service = SimilarityService()
     attribute_classifier_service = AttributeClassifierService(
         clip_model=clip_model, category_classifier=category_classifier
     )
 
-    catalog = indexing_service.load_index(EMBEDDINGS_FILE)
-    logger.info("Loaded %d products from %s", len(catalog), EMBEDDINGS_FILE)
+    catalog = indexing_service.load_index()
+    logger.info("Loaded %d products from Postgres", len(catalog))
 
+    app.state.db_pool = db_pool
     app.state.embedding_service = embedding_service
     app.state.indexing_service = indexing_service
     app.state.similarity_service = similarity_service
@@ -63,6 +68,7 @@ async def lifespan(app: FastAPI):
     yield
 
     logger.info("Shutting down.")
+    db_pool.close()
 
 
 app = FastAPI(

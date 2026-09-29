@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 class ProductRecord(BaseModel):
     """A single indexed product: metadata + its precomputed embedding.
 
-    This is the shape of each entry stored in `backend/data/embeddings.json`.
+    This is the shape of each row in the Postgres `products` table.
     """
 
     sku: str = Field(..., description="Unique product identifier, e.g. 'shoe-red'.")

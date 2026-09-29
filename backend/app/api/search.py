@@ -67,7 +67,7 @@ async def search_by_image(
         HTTPException 400: If the uploaded file is missing/empty/not
             a supported image type.
         HTTPException 503: If the product catalog has not been
-            indexed yet (embeddings.json is empty/missing).
+            indexed yet (the Postgres `products` table is empty).
         HTTPException 500: For any unexpected server-side failure.
     """
     if file.content_type not in ALLOWED_CONTENT_TYPES:

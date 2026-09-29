@@ -1,4 +1,36 @@
 services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: visual-search-db
+    environment:
+      - POSTGRES_DB=visual_search
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    ports:
+      # Host port 5433 (not 5432) so this doesn't collide with a
+      # Postgres instance you might already have running locally.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d visual_search"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  adminer:
+    image: adminer:latest
+    container_name: visual-search-adminer
+    environment:
+      # Pre-fills the login form's "System"/"Server" fields.
+      - ADMINER_DEFAULT_SERVER=db
+    ports:
+      # Dev-only DB dashboard -- not meant to be exposed beyond localhost.
+      - "8081:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+
   backend:
     build:
       context: .
@@ -8,12 +40,17 @@ services:
       - "8010:8000"
     environment:
       - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/visual_search
+    depends_on:
+      db:
+        condition: service_healthy
     volumes:
       # Live-reload app/script code without rebuilding the image.
       - ./backend/app:/app/backend/app
       - ./backend/scripts:/app/backend/scripts
-      # Catalog and generated index stay on the host, so editing
-      # products or rebuilding embeddings doesn't require a rebuild.
+      # Catalog stays on the host, so editing products or rebuilding
+      # embeddings doesn't require a rebuild. The index itself now
+      # lives in the `db` service (see backend/app/db.py), not here.
       - ./catalog:/app/catalog
       - ./backend/data:/app/backend/data
       # Persist the downloaded CLIP weights across container restarts
@@ -23,3 +60,4 @@ services:
 
 volumes:
   huggingface_cache:
+  pgdata:

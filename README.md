@@ -2,12 +2,12 @@
 
 Upload a product photo, get back the top 5 most visually similar
 products from a small local catalog. Runs entirely on your laptop:
-no cloud APIs, no paid services.
+no cloud APIs, no paid services (Postgres runs locally too, via Docker).
 
 ## How it works (short version)
 
 ```
-Product image → CLIP embedding → (optional) color adapter → embeddings.json → cosine similarity → API response
+Product image → CLIP embedding → (optional) color adapter → Postgres/pgvector → cosine similarity → API response
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for the full explanation.
@@ -53,22 +53,22 @@ visual-search-poc/
 │   │   ├── services/
 │   │   │   ├── embedding_service.py     # bytes/file -> (adapted) embedding
 │   │   │   ├── similarity_service.py    # cosine similarity + ranking
-│   │   │   ├── indexing_service.py      # build/load embeddings.json
+│   │   │   ├── indexing_service.py      # build/load the Postgres product index
 │   │   │   ├── attribute_classifier_service.py  # classify an uploaded image's category/color
 │   │   │   └── catalog_filter.py        # category/color filtering (AND for /products, OR for /search)
 │   │   ├── api/
 │   │   │   ├── search.py            # POST /search route
 │   │   │   └── products.py          # GET /products route
+│   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
 │   │   └── schemas/
 │   │       └── search.py            # Pydantic request/response models
 │   ├── scripts/
-│   │   ├── build_embeddings.py      # CLI: catalog/ -> embeddings.json
+│   │   ├── build_embeddings.py      # CLI: catalog/ -> Postgres `products` table
 │   │   ├── generate_training_data.py # CLI: synthetic color/category dataset
 │   │   ├── train_color_adapter.py    # CLI: train the color adapter head
 │   │   ├── train_category_classifier.py  # CLI: train the category classifier head
 │   │   └── import_real_photos.py     # CLI: merge real_training/ photos into the manifest
 │   ├── data/
-│   │   ├── embeddings.json          # generated index (not hand-written)
 │   │   ├── color_adapter.pt         # trained adapter weights (optional, generated)
 │   │   ├── category_classifier.pt   # trained classifier weights (optional, generated)
 │   │   ├── training/                # synthetic + imported real training set (generated)
@@ -129,22 +129,23 @@ optional. Two independent things use `category`/`color`: the
 search checkboxes filter against this metadata field directly. The
 image must be named `image.jpg`, `image.jpeg`, or `image.png`.
 
-## Embedding storage format
+## Product index storage (Postgres + pgvector)
 
-`backend/data/embeddings.json` is a JSON array, one entry per product:
+The product index lives in a `products` table in Postgres, created
+automatically at startup (`app/db.py`) using the
+[`pgvector`](https://github.com/pgvector/pgvector) extension:
 
-```json
-[
-  {
-    "sku": "shoe-red",
-    "name": "Running Shoe Red",
-    "price": 99.0,
-    "category": "Shoes",
-    "color": "red",
-    "image_path": "catalog/shoe-red/image.jpg",
-    "embedding": [0.0182, -0.0431, 0.0705, "... 512 floats total ..."]
-  }
-]
+```sql
+CREATE TABLE products (
+    sku TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    price DOUBLE PRECISION NOT NULL,
+    category TEXT NOT NULL,
+    color TEXT,
+    image_path TEXT NOT NULL,
+    embedding VECTOR(512) NOT NULL
+);
+CREATE INDEX products_embedding_idx ON products USING hnsw (embedding vector_cosine_ops);
 ```
 
 `embedding` is 512-dimensional and L2-normalized. It's
@@ -152,15 +153,22 @@ image must be named `image.jpg`, `image.jpeg`, or `image.png`.
 trained color adapter is present (`backend/data/color_adapter.pt`), in
 which case it's that output passed through the adapter — see
 [below](#color-adapter-optional-local-fine-tune). Either way, every
-embedding in this file and every query embedding at search time go
-through the exact same transformation (`EmbeddingService`), so they
-stay comparable. See
-[`docs/sample_embeddings.json`](docs/sample_embeddings.json) for the
-exact shape (truncated for readability — real vectors have all 512
-values).
+stored embedding and every query embedding at search time go through
+the exact same transformation (`EmbeddingService`), so they stay
+comparable. See
+[`docs/sample_embeddings.json`](docs/sample_embeddings.json) for an
+illustrative shape of one row (truncated for readability — real
+vectors have all 512 values).
 
-This file is **generated**, never hand-edited — run
-`build_embeddings.py` to (re)create it.
+The table is **generated**, never hand-edited — run
+`build_embeddings.py` to (re)build it. Each run `TRUNCATE`s and
+re-inserts the whole catalog, so it's safe to re-run any time products,
+photos, or the color adapter change. Ranking itself (`SimilarityService`)
+still happens in Python, over the catalog loaded into memory at
+startup — pgvector here replaces the old `embeddings.json` flat file
+as the durable, restart-proof store, and its HNSW index is what a
+larger catalog would query directly instead of loading everything into
+memory.
 
 ## Option A: Docker (recommended for first run)
 
@@ -171,10 +179,15 @@ This file is **generated**, never hand-edited — run
 > All commands below assume you're inside `visual-search-poc/` (the
 > project root, where `docker-compose.yml` lives).
 
-The API is exposed on **host port 8010** (mapped to port 8000 inside
-the container) so it doesn't clash with anything already using 8000
-on your machine. Edit the `ports:` line in `docker-compose.yml` if you
-want a different host port.
+`docker-compose.yml` defines three services: `db` (`pgvector/pgvector:pg16`,
+the product index), `adminer` (a lightweight DB dashboard for poking at
+`db`), and `backend` (this API). The API is exposed on **host port
+8010** (mapped to port 8000 inside the container) so it doesn't clash
+with anything already using 8000 on your machine; Postgres is exposed
+on **host port 5433** (mapped to 5432) so it doesn't clash with a
+Postgres you might already have running locally; Adminer is exposed on
+**host port 8081**. Edit the `ports:` lines in `docker-compose.yml` if
+you want different host ports.
 
 ### 1. Build the image
 
@@ -182,11 +195,24 @@ want a different host port.
 docker-compose build
 ```
 
-This installs Python deps (`torch`, `transformers`, etc.) into the
-image. First build downloads a few hundred MB and can take several
-minutes; it's cached after that.
+This installs Python deps (`torch`, `transformers`, `psycopg`, etc.)
+into the `backend` image. First build downloads a few hundred MB and
+can take several minutes; it's cached after that. The `db` image is
+pulled, not built.
 
-### 2. Build the embeddings index
+### 2. Start Postgres
+
+```bash
+docker-compose up -d db
+```
+
+Waits until healthy (`pg_isready`); `backend` also declares this as a
+`depends_on` health condition, so `docker-compose up` (step 4) would
+wait for it anyway — this step just lets you build the index (step 3)
+before starting the API. Data persists in the named volume `pgdata`
+across restarts and `docker-compose down` (not `down -v`).
+
+### 3. Build the embeddings index
 
 Run the indexing script as a one-off container using the same image
 (no need to start the API first):
@@ -195,12 +221,12 @@ Run the indexing script as a one-off container using the same image
 docker-compose run --rm backend python scripts/build_embeddings.py
 ```
 
-This writes to `./backend/data/embeddings.json` on your host (it's a
-mounted volume), and downloads CLIP's weights (~600 MB, once) into a
-named Docker volume (`huggingface_cache`) so later runs/rebuilds don't
-re-download them.
+This computes embeddings and writes them into the `products` table in
+the `db` service (replacing whatever was there before), and downloads
+CLIP's weights (~600 MB, once) into a named Docker volume
+(`huggingface_cache`) so later runs/rebuilds don't re-download them.
 
-### 3. Start the API
+### 4. Start the API
 
 ```bash
 docker-compose up
@@ -217,18 +243,67 @@ so editing code or the catalog on your host is picked up without
 rebuilding the image. You only need to `docker-compose build` again if
 you change `backend/requirements.txt` or the `Dockerfile`.
 
+### Browsing the database (Adminer)
+
+[Adminer](https://www.adminer.org/) is a single-file DB dashboard —
+much lighter than pgAdmin (no separate login/config volume, starts
+instantly) — useful for eyeballing the `products` table without
+reaching for `psql`. It comes up automatically with `docker-compose up`
+(or start it alone: `docker-compose up -d adminer`, which also brings
+up `db` since it depends on it).
+
+Open `http://127.0.0.1:8081` and log in with:
+
+| Field | Value |
+|---|---|
+| System | PostgreSQL |
+| Server | `db` (pre-filled) |
+| Username | `postgres` |
+| Password | `postgres` |
+| Database | `visual_search` |
+
+It's dev-only — no auth beyond the DB credentials above, and not meant
+to be exposed beyond localhost. Everything actually stored is
+non-sensitive (product metadata + embedding vectors), but don't publish
+port 8081 to the open internet as-is.
+
 ### Docker troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `port is already allocated` | Something else on your host is using port 8010. Change the host-side port in `docker-compose.yml`'s `ports:` (e.g. `"8020:8000"`). |
+| `port is already allocated` | Something else on your host is using port 8010, 5433, or 8081. Change the host-side port in `docker-compose.yml`'s `ports:` (e.g. `"8020:8000"`, `"5434:5432"`, or `"8082:8080"`). |
 | Build hangs/times out downloading torch | Slow network — just retry `docker-compose build`; pip resumes from cache where possible. |
-| `/search` returns 503 "Catalog not indexed yet" | You skipped step 2, or `backend/data/embeddings.json` doesn't exist yet — run the `build_embeddings.py` one-off command above. |
+| `backend` exits/restarts immediately, logs show a Postgres connection error | `db` isn't healthy yet — `docker-compose up -d db` first and wait for `docker-compose ps` to show `(healthy)`, or just re-run `docker-compose up` (the `depends_on` health check should handle this automatically). |
+| `/search` returns 503 "Catalog not indexed yet" | You skipped step 3, or the `products` table is empty — run the `build_embeddings.py` one-off command above. |
 
 ## Option B: Local Python setup
 
-> Requires Python 3.12 (3.10+ also works). All commands below assume
+> Requires Python 3.12 (3.10+ also works) and a reachable Postgres
+> with the `pgvector` extension available. All commands below assume
 > you're inside `visual-search-poc/backend/`.
+
+### 0. Start Postgres
+
+Easiest path even for "local" development: let Docker run just the
+`db` service (from the project root, `visual-search-poc/`), and run
+everything else natively:
+
+```bash
+docker-compose up -d db
+```
+
+This listens on `localhost:5433`, which is `app/config.py`'s default
+`DATABASE_URL` — no extra setup needed. Point at a different Postgres
+by setting `DATABASE_URL` yourself, e.g.:
+
+```bash
+export DATABASE_URL="postgresql://user:pass@localhost:5432/visual_search"
+```
+
+(it must have the `vector` extension installed — the `pgvector/pgvector`
+Docker image already includes it; a self-managed Postgres needs
+`CREATE EXTENSION vector` permissions and the extension's files
+present, see [pgvector's install docs](https://github.com/pgvector/pgvector#installation)).
 
 ### 1. Create and activate a virtual environment
 
@@ -267,13 +342,14 @@ Expected output (abridged):
 
 ```
 INFO ... Catalog directory: .../visual-search-poc/catalog
-INFO ... Output file:       .../visual-search-poc/backend/data/embeddings.json
+INFO ... Connecting to Postgres...
+INFO ... Connected to Postgres and ensured the pgvector schema exists.
 INFO ... Loading CLIP model (this can take a while on first run...)
 INFO ... CLIP model loaded successfully.
 INFO ... Indexed product 'bag-black'
 INFO ... Indexed product 'bag-blue'
 ...
-INFO ... Wrote 17 product embeddings to .../embeddings.json
+INFO ... Wrote 17 product embeddings to Postgres
 INFO ... Done. Indexed 17 products in 12.3s.
 ```
 
@@ -339,7 +415,7 @@ The adapter only takes effect on embeddings computed *after* it's
 loaded, so both the catalog and future queries need to go through it:
 
 ```bash
-python scripts/build_embeddings.py   # rebuilds embeddings.json using the adapter
+python scripts/build_embeddings.py   # rebuilds the Postgres index using the adapter
 uvicorn app.main:app --reload        # or: docker-compose restart backend
 ```
 
@@ -602,21 +678,26 @@ curl http://127.0.0.1:8000/health   # or :8010 for Docker
 | Non-image file uploaded | 400 | Unsupported file type |
 | Empty file uploaded | 400 | Uploaded file is empty |
 | Corrupted/unreadable image | 400 | Could not encode image with CLIP |
-| `embeddings.json` missing or empty | 503 | Catalog not indexed yet — run the build script |
+| `products` table missing or empty | 503 | Catalog not indexed yet — run the build script |
 | Unexpected server error | 500 | Internal error while searching |
 
 ## Future improvements
 
-- **V1 (this POC):** CLIP (`clip-vit-base-patch32`) + JSON file storage
-  + brute-force cosine similarity, with an optional trained
+- **V1:** CLIP (`clip-vit-base-patch32`) + JSON file storage + brute-force
+  cosine similarity, with an optional trained
   [color adapter](#color-adapter-optional-local-fine-tune) for ranking
   and a trained [category classifier](#category-classifier-powers-match_category)
   + [category/color filters](#filtering-by-categorycolor) for narrowing
-  results. Fine up to a few hundred products.
-- **V2:** CLIP + PostgreSQL with the `pgvector` extension. Replaces
-  `embeddings.json` with a `products` table and an ANN index
-  (`ivfflat`/`hnsw`), so `IndexingService`/`SimilarityService` gain
-  DB-backed implementations behind the same interfaces.
+  results.
+- **V2 (this POC):** CLIP + PostgreSQL with the `pgvector` extension
+  (see [Product index storage](#product-index-storage-postgres--pgvector)).
+  Replaces the JSON file with a `products` table and an HNSW ANN index,
+  run as a `db` service in `docker-compose.yml`. `IndexingService` is
+  now DB-backed (`app/db.py`), but ranking itself still happens
+  in-memory over the catalog loaded at startup — fine up to a few
+  hundred products; a larger catalog would push the `ORDER BY embedding
+  <=> query` ranking into the SQL query itself instead of loading
+  everything into memory.
 - **V3:** Magento 2 module integration. A Magento observer/cron pushes
   product images to this service on save; a Magento block/API calls
   `/search` from the storefront (e.g. a "search by image" widget) and

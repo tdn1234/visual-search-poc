@@ -1,12 +1,16 @@
 """Indexing service.
 
 Responsibility: build the product index (scan `catalog/`, compute an
-embedding per product, write `embeddings.json`) and load that index
-back into memory at API startup.
+embedding per product, persist to the `products` table in Postgres)
+and load that index back into memory at API startup.
 
 This is the only module that knows about the on-disk catalog layout
 (`catalog/<sku>/image.jpg` + `catalog/<sku>/metadata.json`) and about
-the embeddings JSON file format.
+the `products` table schema (see `app.db`). Storage is Postgres +
+pgvector, but the rest of the app is unaffected: `load_index` still
+hands back a plain `list[ProductRecord]`, so `SimilarityService`,
+`catalog_filter`, and the API routes keep working entirely in memory,
+same as when this was JSON-file-backed.
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+
+from psycopg_pool import ConnectionPool
 
 from app.config import METADATA_FILENAME, SUPPORTED_IMAGE_NAMES
 from app.schemas.search import ProductRecord
@@ -23,14 +29,21 @@ logger = logging.getLogger(__name__)
 
 
 class IndexingService:
-    """Builds and loads the JSON-backed product embedding index."""
+    """Builds and loads the Postgres/pgvector-backed product embedding index."""
 
-    def __init__(self, embedding_service: EmbeddingService) -> None:
-        """Store a reference to the embedding service used to encode images."""
+    def __init__(self, embedding_service: EmbeddingService, db_pool: ConnectionPool) -> None:
+        """Store references to the embedding service and DB pool used to build/load the index.
+
+        Args:
+            embedding_service: Used to encode catalog images.
+            db_pool: An already-open pool from `app.db.create_pool`
+                (schema already ensured to exist).
+        """
         self._embedding_service = embedding_service
+        self._db_pool = db_pool
 
-    def build_index(self, catalog_dir: Path, output_file: Path) -> list[ProductRecord]:
-        """Scan `catalog_dir`, embed every product image, and persist the index.
+    def build_index(self, catalog_dir: Path) -> list[ProductRecord]:
+        """Scan `catalog_dir`, embed every product image, and replace the Postgres index.
 
         Expected catalog layout::
 
@@ -41,10 +54,9 @@ class IndexingService:
 
         Args:
             catalog_dir: Root directory containing one sub-folder per product.
-            output_file: Where to write the resulting embeddings.json.
 
         Returns:
-            The list of `ProductRecord` that was written to disk.
+            The list of `ProductRecord` that was written to the `products` table.
 
         Raises:
             FileNotFoundError: If `catalog_dir` does not exist.
@@ -73,37 +85,68 @@ class IndexingService:
                 "Each product folder needs an image.jpg and a metadata.json."
             )
 
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        with output_file.open("w", encoding="utf-8") as file:
-            json.dump([record.model_dump() for record in records], file, indent=2)
-
-        logger.info("Wrote %d product embeddings to %s", len(records), output_file)
+        self._replace_all(records)
+        logger.info("Wrote %d product embeddings to Postgres", len(records))
         return records
 
-    def load_index(self, embeddings_file: Path) -> list[ProductRecord]:
-        """Load a previously built embeddings.json into memory.
-
-        Args:
-            embeddings_file: Path to embeddings.json.
+    def load_index(self) -> list[ProductRecord]:
+        """Load the current Postgres-backed index into memory.
 
         Returns:
-            The list of `ProductRecord` found in the file. Returns an
-            empty list (rather than raising) if the file does not
-            exist yet, so the API can start up before the catalog has
-            been indexed for the first time.
+            The list of `ProductRecord` currently stored in the
+            `products` table. Returns an empty list (rather than
+            raising) if the table has no rows yet, so the API can
+            start up before the catalog has been indexed for the
+            first time.
         """
-        if not embeddings_file.exists():
+        with self._db_pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT sku, name, price, category, color, image_path, embedding "
+                "FROM products ORDER BY sku"
+            ).fetchall()
+
+        if not rows:
             logger.warning(
-                "Embeddings file not found at %s. "
-                "Run 'python scripts/build_embeddings.py' to create it.",
-                embeddings_file,
+                "No products indexed yet. Run 'python scripts/build_embeddings.py' to build the index."
             )
             return []
 
-        with embeddings_file.open("r", encoding="utf-8") as file:
-            raw_records = json.load(file)
+        return [
+            ProductRecord(
+                sku=row[0],
+                name=row[1],
+                price=row[2],
+                category=row[3],
+                color=row[4],
+                image_path=row[5],
+                embedding=[float(value) for value in row[6]],
+            )
+            for row in rows
+        ]
 
-        return [ProductRecord(**raw_record) for raw_record in raw_records]
+    def _replace_all(self, records: list[ProductRecord]) -> None:
+        """Atomically swap the whole `products` table for `records`."""
+        with self._db_pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("TRUNCATE TABLE products")
+                cur.executemany(
+                    """
+                    INSERT INTO products (sku, name, price, category, color, image_path, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            record.sku,
+                            record.name,
+                            record.price,
+                            record.category,
+                            record.color,
+                            record.image_path,
+                            record.embedding,
+                        )
+                        for record in records
+                    ],
+                )
 
     def _build_single_record(self, product_dir: Path, catalog_dir: Path) -> ProductRecord:
         """Build one `ProductRecord` from a single `catalog/<sku>/` folder.

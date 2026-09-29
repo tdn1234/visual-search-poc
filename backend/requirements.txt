@@ -25,3 +25,8 @@ numpy==1.26.4
 
 # --- Data validation ---
 pydantic==2.9.2
+
+# --- Vector database (pgvector) ---
+psycopg[binary]==3.2.3
+psycopg-pool==3.2.3
+pgvector==0.3.6
