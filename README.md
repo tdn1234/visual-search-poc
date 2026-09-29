@@ -60,16 +60,19 @@ visual-search-poc/
 │   │   │   └── attribute_classifier_service.py  # classify an uploaded image's category/color
 │   │   ├── api/
 │   │   │   ├── search.py            # POST /search route
-│   │   │   └── products.py          # GET /products + POST /products (add a product) routes
+│   │   │   └── products.py          # GET /products, POST /products, POST /products/import routes
 │   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
 │   │   ├── auth.py                  # X-API-Key header check (require_api_key)
 │   │   ├── rate_limit.py            # Redis-backed slowapi Limiter instance
+│   │   ├── queue.py                 # RQ producer: enqueues bulk-import jobs (API process side)
+│   │   ├── jobs.py                  # RQ consumer: the import job itself (worker process side)
 │   │   ├── logging_config.py        # log format + request-ID correlation filter
 │   │   ├── middleware.py            # assigns request IDs, logs one access-log line per request
 │   │   └── schemas/
 │   │       └── search.py            # Pydantic request/response models
 │   ├── scripts/
 │   │   ├── build_embeddings.py      # CLI: catalog/ -> Postgres `products` table
+│   │   ├── run_worker.py            # CLI: consume queued bulk-import jobs (the `worker` service)
 │   │   ├── generate_training_data.py # CLI: synthetic color/category dataset
 │   │   ├── train_color_adapter.py    # CLI: train the color adapter head
 │   │   ├── train_category_classifier.py  # CLI: train the category classifier head
@@ -186,17 +189,21 @@ Python code above it.
 > All commands below assume you're inside `visual-search-poc/` (the
 > project root, where `docker-compose.yml` lives).
 
-`docker-compose.yml` defines four services: `db` (`pgvector/pgvector:pg16`,
+`docker-compose.yml` defines five services: `db` (`pgvector/pgvector:pg16`,
 the product index), `adminer` (a lightweight DB dashboard for poking at
-`db`), `redis` (backs the request rate limiter), and `backend` (this
-API). The API is exposed on **host port 8010** (mapped to port 8000
-inside the container) so it doesn't clash with anything already using
-8000 on your machine; Postgres is exposed on **host port 5433**
-(mapped to 5432) so it doesn't clash with a Postgres you might already
-have running locally; Adminer is exposed on **host port 8081**; Redis
-is exposed on **host port 6380** (mapped to 6379), same reasoning as
-Postgres. Edit the `ports:` lines in `docker-compose.yml` if you want
-different host ports.
+`db`), `redis` (backs the request rate limiter *and* the bulk-import
+job queue), `backend` (this API), and `worker` (consumes queued bulk
+imports -- see [Bulk product import](#bulk-product-import-post-productsimport)
+below; same image as `backend`, just a different `command:`, so
+`docker-compose build` builds both at once). The API is exposed on
+**host port 8010** (mapped to port 8000 inside the container) so it
+doesn't clash with anything already using 8000 on your machine;
+Postgres is exposed on **host port 5433** (mapped to 5432) so it
+doesn't clash with a Postgres you might already have running locally;
+Adminer is exposed on **host port 8081**; Redis is exposed on **host
+port 6380** (mapped to 6379), same reasoning as Postgres. `worker`
+exposes no ports -- it isn't an HTTP service. Edit the `ports:` lines
+in `docker-compose.yml` if you want different host ports.
 
 ### 1. Build the image
 
@@ -242,15 +249,22 @@ docker-compose up
 ```
 
 The API is now live at `http://127.0.0.1:8010`. Interactive docs
-(Swagger UI) are at `http://127.0.0.1:8010/docs`. Stop it with `Ctrl+C`,
-or run detached with `docker-compose up -d` and stop later with
+(Swagger UI) are at `http://127.0.0.1:8010/docs`. This also starts the
+`worker` service (no separate step needed) -- it loads CLIP a second
+time, independently of the API process, and sits idle until something
+calls `POST /products/import`. Stop everything with `Ctrl+C`, or run
+detached with `docker-compose up -d` and stop later with
 `docker-compose down`.
 
 `app/`, `scripts/`, `catalog/`, and `backend/data/` are all
-volume-mounted into the container and `uvicorn` runs with `--reload`,
-so editing code or the catalog on your host is picked up without
-rebuilding the image. You only need to `docker-compose build` again if
-you change `backend/requirements.txt` or the `Dockerfile`.
+volume-mounted into both `backend` and `worker`, and `uvicorn` runs
+with `--reload` (for `backend`), so editing code or the catalog on
+your host is picked up without rebuilding the image -- except
+`worker`, which doesn't auto-reload (it's a plain blocking loop, not
+`uvicorn`); restart it yourself after changing `app/jobs.py` or
+`app/services/indexing_service.py`: `docker-compose restart worker`.
+You only need to `docker-compose build` again if you change
+`backend/requirements.txt` or the `Dockerfile`.
 
 ### Browsing the database (Adminer)
 
@@ -284,6 +298,7 @@ port 8081 to the open internet as-is.
 | Build hangs/times out downloading torch | Slow network — just retry `docker-compose build`; pip resumes from cache where possible. |
 | `backend` exits/restarts immediately, logs show a Postgres connection error | `db` isn't healthy yet — `docker-compose up -d db` first and wait for `docker-compose ps` to show `(healthy)`, or just re-run `docker-compose up` (the `depends_on` health check should handle this automatically). |
 | `/search` returns 503 "Catalog not indexed yet" | You skipped step 3, or the `products` table is empty — run the `build_embeddings.py` one-off command above. |
+| `POST /products/import` returns `202` but products never appear | The `worker` service isn't running — check `docker-compose ps` and `docker-compose logs worker`. Queuing a job never fails just because no worker is up; nothing processes it until one is. |
 
 ## Option B: Local Python setup
 
@@ -381,6 +396,20 @@ uvicorn app.main:app --reload
 
 The API is now live at `http://127.0.0.1:8000`. Interactive docs
 (Swagger UI) are at `http://127.0.0.1:8000/docs`.
+
+### 5. (Optional) Start a worker, if you'll use bulk import
+
+Only needed for `POST /products/import` (see
+[Bulk product import](#bulk-product-import-post-productsimport)) --
+`/search` and the single-product `POST /products` work fully without
+it. In a separate terminal (same venv):
+
+```bash
+python scripts/run_worker.py
+```
+
+Loads CLIP a second time (independently of the API process above) and
+blocks, waiting for queued import jobs.
 
 ## Color adapter (optional local fine-tune)
 
@@ -684,6 +713,105 @@ insert fails), `IndexingService.add_product` removes that folder again
 before returning the error — a failed request never leaves a
 half-written product on disk.
 
+## Bulk product import (`POST /products/import`)
+
+For importing many products at once (e.g. a Magento catalog export) —
+the batch counterpart to `POST /products`. Send **all** products'
+metadata and photos in a single multipart request; this service embeds
+each one **in the background** via a Redis-backed job queue instead of
+inline, so a large batch can't tie up the API process or blow past an
+HTTP client's timeout waiting for hundreds of CLIP calls to finish.
+
+```bash
+curl -X POST "http://127.0.0.1:8010/products/import" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -F 'products=[
+        {"sku":"bag-purple","name":"Canvas Bag Purple","price":59.99,"category":"Bags","color":"purple"},
+        {"sku":"hat-orange","name":"Baseball Cap Orange","price":19.99,"category":"Accessories","color":"orange"}
+      ]' \
+  -F "files=@/path/to/bag-purple.jpg;type=image/jpeg" \
+  -F "files=@/path/to/hat-orange.jpg;type=image/jpeg"
+```
+
+```json
+{"batch_id":"8c2f11be4d7a","queued":2}
+```
+
+**Shape:** one `products` field (a JSON array of the same fields
+`POST /products` takes as form fields — `sku`, `name`, `price`,
+`category`, optional `color`) plus a `files` field repeated once per
+product. **The two must line up by position, in order**:
+`products[0]` is embedded from the first `files` entry, `products[1]`
+from the second, and so on — there's no filename matching, so upload
+order is what determines the pairing. Max batch size is
+`MAX_BULK_IMPORT_ITEMS` (default 100, env-overridable) — the endpoint
+reads every file into memory before returning, so an unbounded batch
+would be an easy way to exhaust the API process's memory.
+
+**This is fire-and-forget: there is no status endpoint.** The `202`
+response only confirms the batch was *queued*, not that any individual
+product actually got embedded/stored — that happens later, off the
+request, in the separate `worker` container. Outcomes (including a
+duplicate `sku` or a corrupt image, which are only discoverable once a
+worker actually processes the job) show up **only in the worker's
+logs**, correlated by the `batch_id` from the response:
+
+```bash
+docker-compose logs worker | grep 8c2f11be4d7a
+```
+
+```
+2026-09-29 ... [import-8c2f11be4d7a-0] app.jobs: Imported product 'bag-purple' (batch '8c2f11be4d7a', item 0)
+2026-09-29 ... [import-8c2f11be4d7a-1] app.jobs: Imported product 'hat-orange' (batch '8c2f11be4d7a', item 1)
+```
+
+(a skipped duplicate logs a `WARNING` in the same place instead, e.g.
+`Skipped product 'bag-purple' ... already exists`.)
+
+**Why a queue instead of just looping `POST /products` N times, or
+processing the batch inline:** either alternative ties up an HTTP
+request (yours, or a script's) for as long as the *whole* batch takes
+to embed — at roughly the per-image CLIP cost you'd see from
+`POST /search`'s `LOG_LEVEL=DEBUG` timing (well under a second each,
+but that adds up linearly with batch size, and a slow/failed item
+partway through a synchronous loop leaves you guessing which ones
+actually landed). Queuing returns in milliseconds regardless of batch
+size and lets a `worker` container absorb the real work independently
+-- see `docs/architecture.md`'s "Bulk product import" section for the
+full design (why `SimpleWorker` specifically, why the worker loads
+CLIP once at startup rather than per job, why validation happens
+synchronously in the request but storage doesn't).
+
+**Same storage guarantees as `POST /products`:** each import job calls
+the exact same `IndexingService.add_product` the single-product
+endpoint calls synchronously — same `catalog/<sku>/` write, same DB
+insert, same rollback-on-failure, same reason (a later full reindex
+mustn't drop it). A bulk-imported product is indistinguishable from
+one added through `POST /products` once it lands.
+
+**Validation that *does* happen synchronously** (so obviously broken
+requests fail fast instead of queuing garbage): `products` must be
+valid JSON, must be an array, must have exactly as many entries as
+`files` (matched by position), each entry must pass the same
+constraints as `POST /products`' form fields, and the batch must be
+non-empty and within `MAX_BULK_IMPORT_ITEMS`. All checked *before*
+anything is queued -- an invalid item well into a large batch fails
+the whole request rather than partially queuing it.
+
+| Situation | HTTP status |
+|---|---|
+| `products` isn't valid JSON, isn't an array, is empty, or exceeds `MAX_BULK_IMPORT_ITEMS` | 400 |
+| `products`/`files` counts don't match | 400 |
+| An entry fails validation (bad `sku`, non-positive `price`, missing field) | 400 |
+| A file is missing/empty/unsupported content type | 400 |
+| Missing/invalid `X-API-Key` | 401 |
+| Rate limit exceeded (`BULK_IMPORT_RATE_LIMIT`, default 5/minute — the tightest of the three `/products` limits, since this reads every file in the batch into memory) | 429 |
+
+Duplicate `sku`, a corrupt image the content-type header didn't catch,
+or any other failure only a worker can detect — **not** in this table,
+because they never reach the HTTP response; see the worker-logs note
+above.
+
 ## Testing the API
 
 > Use port `8010` if you started the API via Docker (Option A), or
@@ -771,9 +899,10 @@ Every route except `/health` requires an `X-API-Key` header
 |---|---|---|---|
 | `POST /search` | 20/minute | `SEARCH_RATE_LIMIT` | Runs CLIP inference (the expensive part) plus a DB query. |
 | `GET /products` | 60/minute | `PRODUCTS_RATE_LIMIT` | Plain SQL filter, no ML involved — cheap enough for a looser limit. |
-| `POST /products` | 10/minute | `CREATE_PRODUCT_RATE_LIMIT` | Runs CLIP inference *and* writes to disk — the tightest budget of the three. |
+| `POST /products` | 10/minute | `CREATE_PRODUCT_RATE_LIMIT` | Runs CLIP inference *and* writes to disk. |
+| `POST /products/import` | 5/minute | `BULK_IMPORT_RATE_LIMIT` | Reads every file in the batch into memory synchronously before queuing — the tightest of the four, since one call can carry many products' worth of work. |
 
-All three live in `app/config.py` (env-overridable, same pattern as
+All four live in `app/config.py` (env-overridable, same pattern as
 `API_KEY`/`DATABASE_URL`), in [`limits`-library syntax](https://limits.readthedocs.io/en/stable/quickstart.html#rate-limit-string-notation)
 (`"<count>/<second|minute|hour|day>"`). To change one without touching
 code:
@@ -883,6 +1012,7 @@ internals are noise here, not debugging signal — see
 | `products` table missing or empty (`/search`) | 503 | Catalog not indexed yet — run the build script |
 | `sku` already exists (`POST /products`) | 409 | Product '\<sku\>' already exists |
 | Invalid `sku`/`price`/missing field (`POST /products`) | 422 | Pydantic validation error detail |
+| `products`/`files` mismatch, invalid batch JSON, or oversized batch (`POST /products/import`) | 400 | See [Bulk product import](#bulk-product-import-post-productsimport) |
 | Unexpected server error | 500 | Internal error while searching / creating the product |
 
 ## Future improvements
@@ -901,10 +1031,16 @@ internals are noise here, not debugging signal — see
   through `ProductQueryService`, which runs an actual SQL query per
   request (`ORDER BY embedding <=> $query LIMIT k`, answered by the
   HNSW index) -- the catalog is never loaded into the API process.
-- **V3:** Magento 2 module integration. A Magento observer/cron pushes
-  product images to this service on save; a Magento block/API calls
-  `/search` from the storefront (e.g. a "search by image" widget) and
-  resolves returned SKUs back to real Magento product pages.
+- **V3 (partially done):** Magento 2 integration. The ingestion side
+  exists now -- `POST /products` for one product at a time,
+  `POST /products/import` for a bulk catalog export/sync, queued
+  through Redis + a `worker` service (see
+  [Bulk product import](#bulk-product-import-post-productsimport)) so
+  large imports don't block. Still needed: the actual Magento-side
+  module/observer that calls these endpoints on product save/export,
+  and a Magento block/API that calls `/search` from the storefront
+  (e.g. a "search by image" widget) and resolves returned SKUs back to
+  real Magento product pages.
 - **V4:** Free-text query support. `match_category`/`match_color`
   already cover structured filtering; a further step would let a
   query combine an uploaded image with free text (e.g. "under $100")

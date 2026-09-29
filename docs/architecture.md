@@ -48,9 +48,9 @@ CLIP or pgvector at all, just a plain SQL `WHERE` filter
 (`ProductQueryService.list_products`) over the `products` table's
 metadata columns.
 
-## Five separate flows
+## Six separate flows
 
-There are deliberately **five independent flows** that never run in
+There are deliberately **six independent flows** that never run in
 the same request:
 
 1. **Offline adapter/classifier training**
@@ -91,15 +91,28 @@ the same request:
    flows.
 
 5. **Online product creation** (`POST /products`, served by FastAPI) —
-   the one flow that's both online *and* a write. Embeds the uploaded
-   photo (same `EmbeddingService` transformation as flow 3, so the new
-   product is immediately comparable against everything flow 2 already
-   indexed) and calls `IndexingService.add_product`, which writes
-   `catalog/<sku>/` (image + metadata.json) *and* inserts one row into
-   `products` -- both, not just the DB row, specifically so flow 2
-   doesn't silently delete this product on its next full rebuild (see
+   embeds the uploaded photo (same `EmbeddingService` transformation as
+   flow 3, so the new product is immediately comparable against
+   everything flow 2 already indexed) and calls
+   `IndexingService.add_product`, which writes `catalog/<sku>/` (image
+   + metadata.json) *and* inserts one row into `products` -- both, not
+   just the DB row, specifically so flow 2 doesn't silently delete this
+   product on its next full rebuild (see
    [Why product creation also writes to disk](#why-product-creation-also-writes-to-disk)
-   below).
+   below). Synchronous: the response only returns once the product is
+   fully stored.
+
+6. **Bulk product import** (`POST /products/import`, served by
+   FastAPI, but *processed* by a separate `worker` process) —
+   structurally validates a whole batch (JSON shape, field-level
+   constraints, file types) synchronously, then enqueues one job per
+   product onto a Redis-backed queue and returns immediately, without
+   waiting for any embedding to happen. A `worker` container
+   (`scripts/run_worker.py` + `app/jobs.py`) drains that queue,
+   calling the exact same `IndexingService.add_product` flow 5 calls
+   inline. See [Bulk product import](#bulk-product-import) below for
+   why this one flow splits across two processes instead of running
+   entirely within the request like flows 3-5.
 
 Keeping flows 1-4 separate from each other is what makes "every read
 request queries Postgres directly, nothing cached in the app" viable
@@ -112,9 +125,11 @@ be in different (non-comparable) vector spaces. (The category
 classifier doesn't have this constraint -- it only classifies the
 *uploaded* image at query time, never touches stored catalog
 embeddings, so retraining it takes effect immediately on API restart,
-no reindex needed.) Flow 5 is the odd one out precisely because it's a
-write that happens online -- see the dedicated section below for how
-it stays consistent with flow 2 rather than fighting it.
+no reindex needed.) Flows 5 and 6 are the odd ones out precisely
+because they're writes that happen online -- see the dedicated
+sections below for how each stays consistent with flow 2 rather than
+fighting it, and how 6 additionally avoids blocking on the ML work 5
+does inline.
 
 ## Why product creation also writes to disk
 
@@ -154,6 +169,83 @@ either a two-phase write (temp folder + atomic rename) or to treat
 `catalog/` as a cache rebuildable from Postgres instead of the other
 way around.
 
+## Bulk product import
+
+`POST /products/import` (flow 6) exists for one reason: `POST /products`
+(flow 5) does real work inline -- CLIP inference plus a filesystem
+write -- and that's fine for one product per request, but doesn't
+scale to "import a few hundred products from a Magento export" without
+either a very long-lived HTTP request or the client looping the
+single-product endpoint hundreds of times, each paying full HTTP
+overhead and leaving no good way to know which items landed if one
+partway through fails.
+
+**Split across two processes, not two code paths.** The actual
+per-product work -- embed the photo, write `catalog/<sku>/`, insert
+the DB row -- is `IndexingService.add_product`, the *same* method flow
+5 calls. Bulk import doesn't reimplement or wrap it differently; it
+just calls it from a different process, later:
+
+- **Producer** (`app/queue.py`, imported by `api/products.py`, so part
+  of the API process): owns the RQ `Queue` and one function,
+  `enqueue_import_job`, that pushes a job onto Redis. Jobs are
+  enqueued by string reference (`"app.jobs.import_product_job"`), not
+  a direct Python import of `app.jobs` -- so the API process never
+  needs to import `IndexingService`/`ClipModel` for this feature at
+  all, keeping the "API process never touches CLIP for anything but
+  `/search`" property flows 3-5 already had.
+- **Consumer** (`app/jobs.py` + `scripts/run_worker.py`, the `worker`
+  docker-compose service -- never imported by the API process):
+  `run_worker.py` calls `jobs.init_services()` once at process
+  startup, loading CLIP and opening a DB pool exactly like
+  `app.main`'s `lifespan` does for the API -- then starts an RQ work
+  loop that calls `jobs.import_product_job` once per queued item, each
+  of which just delegates to `IndexingService.add_product`.
+
+**Why `SimpleWorker`, not RQ's default `Worker`.** RQ's default
+`Worker` forks a child process per job (useful for isolating crashes/
+memory leaks between jobs). That's actively dangerous here: this
+worker holds a live psycopg connection pool and a loaded CLIP model in
+memory, initialized once at startup specifically so jobs don't pay
+that cost repeatedly. Forking after that duplicates the pool's open
+socket into the child, which is a well-known way to corrupt a
+connection both processes now think they own. `SimpleWorker` runs jobs
+in-process, one at a time, no fork -- exactly the "load once at
+startup, reuse for every job" model `init_services()` is built around,
+and entirely adequate at this POC's scale (a queue depth in the tens
+or hundreds, not a throughput target that needs multiple worker
+processes).
+
+**Validation is split deliberately between the two sides.** Everything
+checkable without touching Postgres or CLIP -- is the JSON well-formed,
+do `products`/`files` counts match, does each item satisfy
+`BulkProductItem`'s constraints, is the batch within
+`MAX_BULK_IMPORT_ITEMS`, is each file a supported content type --
+happens synchronously in `api/products.py`, *before* anything is
+queued, so an obviously malformed batch fails the whole request with a
+specific error instead of partially queuing garbage. Everything that
+genuinely requires the DB or CLIP -- does this `sku` already exist, is
+this file actually a decodable image -- can only be discovered once a
+worker processes the job, so it happens there instead, and is *logged*
+rather than surfaced back to the caller (see below).
+
+**Fire-and-forget is a deliberate scope decision, not an oversight.**
+There is no `GET /products/import/{batch_id}` status endpoint. Each
+job sets `app.logging_config.request_id_var` to
+`f"import-{batch_id}-{item_index}"` before calling `add_product` (the
+same mechanism `RequestContextMiddleware` uses for HTTP requests, just
+driven manually here since there's no request), so every log line for
+one item -- success or a caught `FileExistsError`/`ValueError` -- is
+correlated and grep-able (`docker-compose logs worker | grep
+<batch_id>`), but that correlation lives only in logs, not in any
+queryable job-status store. A production version handling a partner
+integration like this would likely want a persisted per-item status
+(RQ's own result backend already stores outcomes for a configurable
+TTL, which `enqueue_import_job` doesn't currently expose) so Magento
+itself could ask "did SKU X import successfully" instead of a human
+grepping logs. Revisit if the answer to "does Magento need to know
+per-item outcomes" changes.
+
 ## Why embeddings are pre-normalized
 
 `ClipModel.encode_image` L2-normalizes every embedding it produces
@@ -187,12 +279,15 @@ loaded.
 | Infra | `app/db.py` | Owns the psycopg connection pool, registers pgvector's Python adapter, and ensures the `vector` extension/`products` table/HNSW index exist. The only module that imports psycopg. |
 | Infra | `app/auth.py` | `require_api_key`, a FastAPI dependency checking the `X-API-Key` header against `API_KEY`. Applied at the router level in `api/search.py`/`api/products.py`, not per-route. |
 | Infra | `app/rate_limit.py` | The single Redis-backed `slowapi` `Limiter` instance, keyed by client IP. Endpoints import it to set their own `@limiter.limit(...)`; `main.py` wires the shared exception handler/middleware once. |
-| Infra | `app/logging_config.py` | Configures the root logger once (`configure_logging`, called first thing in `main.py`); owns `request_id_var` (a `ContextVar`) and the filter that stamps it onto every log record. Pins noisy third-party loggers to `WARNING`. |
-| Infra | `app/middleware.py` | `RequestContextMiddleware` -- the only thing that sets `request_id_var`. Assigns/propagates a request ID, logs one access-log line per request with timing, sets the `X-Request-ID` response header. Registered as the outermost middleware. |
+| Infra | `app/logging_config.py` | Configures the root logger once (`configure_logging`, called first thing in `main.py` *and* `scripts/run_worker.py`); owns `request_id_var` (a `ContextVar`) and the filter that stamps it onto every log record. Pins noisy third-party loggers to `WARNING`. |
+| Infra | `app/middleware.py` | `RequestContextMiddleware` -- sets `request_id_var` for HTTP requests. Assigns/propagates a request ID, logs one access-log line per request with timing, sets the `X-Request-ID` response header. Registered as the outermost middleware. (`app/jobs.py` sets the same `ContextVar` its own way, for queued jobs instead of requests.) |
+| Infra | `app/queue.py` | **Bulk-import producer**, imported only by `api/products.py`. Owns the RQ `Queue` and `enqueue_import_job`, which pushes a job by string reference (`"app.jobs.import_product_job"`) -- the API process never imports `app.jobs`/`IndexingService`/`ClipModel` for this feature. |
+| Infra | `app/jobs.py` | **Bulk-import consumer**, imported only by `scripts/run_worker.py` (never the API process). `init_services()` loads CLIP + opens a DB pool once, eagerly, for the worker's whole lifetime; `import_product_job` calls `IndexingService.add_product` per queued item, catching/logging `FileExistsError`/`ValueError` instead of raising (fire-and-forget). |
 | API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a `SEARCH_RATE_LIMIT` limit (CLIP inference is the expensive part). |
-| API | `app/api/products.py` | HTTP concerns only. `GET /products`: plain metadata filtering, no image/embedding involved, `PRODUCTS_RATE_LIMIT`. `POST /products`: validates the upload + form fields (`SKU_PATTERN`, content type), calls `IndexingService.add_product`, maps `FileExistsError`/`ValueError` to 409/400; its own tighter `CREATE_PRODUCT_RATE_LIMIT`. Both share router-level auth. |
-| Entrypoint | `app/main.py` | Configures logging first, then wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit and request-logging middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
-| Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow. |
+| API | `app/api/products.py` | HTTP concerns only. `GET /products`: plain metadata filtering, `PRODUCTS_RATE_LIMIT`. `POST /products`: validates the upload + form fields (`SKU_PATTERN`, content type), calls `IndexingService.add_product` synchronously, maps `FileExistsError`/`ValueError` to 409/400, `CREATE_PRODUCT_RATE_LIMIT`. `POST /products/import`: validates a whole batch's *shape* synchronously (JSON, counts, per-item fields, file types), then calls `app.queue.enqueue_import_job` per item and returns `202` without waiting, `BULK_IMPORT_RATE_LIMIT`. All three share router-level auth. |
+| Entrypoint | `app/main.py` | Configures logging first, then wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit and request-logging middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. Never imports `app.jobs` (see `app/queue.py`'s row above). |
+| Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow (flow 2). |
+| Script | `scripts/run_worker.py` | CLI entrypoint for the `worker` service (flow 6's consumer). Calls `app.jobs.init_services()` once, then runs an RQ `SimpleWorker` work loop -- see [Bulk product import](#bulk-product-import) for why `SimpleWorker` specifically. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
 | Script | `scripts/train_color_adapter.py` | CLI entrypoint for the offline color-adapter-training flow. |
 | Script | `scripts/train_category_classifier.py` | CLI entrypoint for the offline category-classifier-training flow. Reuses `train_color_adapter.py`'s manifest/embedding-cache helpers directly rather than duplicating them. |

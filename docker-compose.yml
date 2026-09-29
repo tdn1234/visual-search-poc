@@ -50,6 +50,10 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # Explicit tag (rather than letting compose auto-name it) so `worker`
+    # below can declare the same image and the two never drift -- both
+    # run identical code, just with a different `command:`.
+    image: visual-search-poc-backend
     container_name: visual-search-backend
     ports:
       - "8010:8000"
@@ -61,7 +65,8 @@ services:
       # your own machine (main.py logs a warning at startup if you don't).
       - API_KEY=dev-api-key-change-me
       # Uncomment to override the per-endpoint rate limits (defaults set
-      # in app/config.py: SEARCH_RATE_LIMIT=20/minute, PRODUCTS_RATE_LIMIT=60/minute).
+      # in app/config.py: SEARCH_RATE_LIMIT=20/minute, PRODUCTS_RATE_LIMIT=60/minute,
+      # CREATE_PRODUCT_RATE_LIMIT=10/minute, BULK_IMPORT_RATE_LIMIT=5/minute).
       # - SEARCH_RATE_LIMIT=20/minute
       # - PRODUCTS_RATE_LIMIT=60/minute
       # DEBUG adds per-step timing logs (CLIP embed, attribute
@@ -86,6 +91,36 @@ services:
       # and rebuilds (first run downloads ~600MB from Hugging Face).
       - huggingface_cache:/root/.cache/huggingface
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: visual-search-poc-backend
+    container_name: visual-search-worker
+    # Consumes app.config.PRODUCT_IMPORT_QUEUE_NAME (POST /products/import's
+    # jobs). No ports -- this isn't an HTTP service. Loads its own CLIP
+    # model + DB pool independently of `backend` (see app/jobs.py):
+    # a separate process, so it can't reuse the API process's copies.
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql://postgres:postgres@db:5432/visual_search
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/backend/app
+      - ./backend/scripts:/app/backend/scripts
+      # Writes catalog/<sku>/ for every product it imports -- same as
+      # `backend`'s POST /products, just triggered from a queued job
+      # instead of an inline request.
+      - ./catalog:/app/catalog
+      - ./backend/data:/app/backend/data
+      - huggingface_cache:/root/.cache/huggingface
+    command: python scripts/run_worker.py
 
 volumes:
   huggingface_cache:

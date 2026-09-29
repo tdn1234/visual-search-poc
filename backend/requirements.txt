@@ -34,3 +34,6 @@ pgvector==0.3.6
 # --- Auth & rate limiting ---
 slowapi==0.1.9
 redis==5.0.8
+
+# --- Background job queue (bulk product import) ---
+rq==1.16.2

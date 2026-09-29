@@ -65,6 +65,27 @@ PRODUCTS_RATE_LIMIT: str = os.environ.get("PRODUCTS_RATE_LIMIT", "60/minute")
 # write, not just a SQL query -- closer in cost to /search than to
 # GET /products, so it gets its own (tighter) budget.
 CREATE_PRODUCT_RATE_LIMIT: str = os.environ.get("CREATE_PRODUCT_RATE_LIMIT", "10/minute")
+# POST /products/import reads every uploaded file into memory
+# synchronously (bounded by MAX_BULK_IMPORT_ITEMS below) before handing
+# off to the queue -- tighter still, since one call can carry many
+# products' worth of work.
+BULK_IMPORT_RATE_LIMIT: str = os.environ.get("BULK_IMPORT_RATE_LIMIT", "5/minute")
+
+# --- Bulk product import (queue) --------------------------------------------
+# POST /products/import enqueues one background job per product onto
+# this Redis-backed RQ queue (see app/queue.py) instead of embedding
+# synchronously in the request -- see docs/architecture.md's "Bulk
+# product import" section for why. scripts/run_worker.py is the
+# consumer; it must be running (the `worker` docker-compose service)
+# for queued imports to actually happen -- queuing a job never fails
+# just because no worker is currently listening, but nothing processes
+# it until one is.
+PRODUCT_IMPORT_QUEUE_NAME: str = "product_import"
+
+# Caps how many products one POST /products/import call can enqueue,
+# since the endpoint reads every file into memory before returning --
+# an unbounded batch is an easy way to exhaust the API process's memory.
+MAX_BULK_IMPORT_ITEMS: int = int(os.environ.get("MAX_BULK_IMPORT_ITEMS", "100"))
 
 # --- Search configuration ---------------------------------------------------
 TOP_K_RESULTS: int = 5

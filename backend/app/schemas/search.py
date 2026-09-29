@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from app.config import SKU_PATTERN
+
 
 class ProductRecord(BaseModel):
     """A single indexed product: metadata + its precomputed embedding.
@@ -54,3 +56,33 @@ class ProductListResponse(BaseModel):
     """Top-level response envelope for GET /products."""
 
     results: list[ProductSummary]
+
+
+class BulkProductItem(BaseModel):
+    """One product's metadata inside a `POST /products/import` batch.
+
+    Same fields/constraints as the single-product `POST /products`
+    form, just as JSON instead of form fields -- see
+    `api/products.py`'s `bulk_import_products` for how the matching
+    `files` list lines up with these by array index.
+    """
+
+    sku: str = Field(..., pattern=SKU_PATTERN, description="Unique product identifier, e.g. 'shoe-purple'.")
+    name: str = Field(..., description="Human-readable product name.")
+    price: float = Field(..., gt=0, description="Product price.")
+    category: str = Field(..., description="Product category, e.g. 'Shoes'.")
+    color: str | None = Field(None, description="Dominant product color, e.g. 'purple'. Optional.")
+
+
+class BulkImportResponse(BaseModel):
+    """Top-level response envelope for POST /products/import.
+
+    Fire-and-forget by design (see docs/architecture.md's "Bulk
+    product import" section) -- this only confirms the batch was
+    queued, not that any individual product was actually imported.
+    Per-item outcomes are in the worker's logs, correlated by
+    `batch_id` (e.g. `docker-compose logs worker | grep <batch_id>`).
+    """
+
+    batch_id: str
+    queued: int
