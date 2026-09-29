@@ -105,14 +105,15 @@ the same request:
 6. **Bulk product import** (`POST /products/import`, served by
    FastAPI, but *processed* by a separate `worker` process) —
    structurally validates a whole batch (JSON shape, field-level
-   constraints, file types) synchronously, then enqueues one job per
-   product onto a Redis-backed queue and returns immediately, without
-   waiting for any embedding to happen. A `worker` container
-   (`scripts/run_worker.py` + `app/jobs.py`) drains that queue,
+   constraints, file types) synchronously, then publishes one message
+   per product onto a durable RabbitMQ queue and returns immediately,
+   without waiting for any embedding to happen. A `worker` container
+   (`scripts/run_worker.py` + `app/jobs.py`) consumes that queue,
    calling the exact same `IndexingService.add_product` flow 5 calls
    inline. See [Bulk product import](#bulk-product-import) below for
-   why this one flow splits across two processes instead of running
-   entirely within the request like flows 3-5.
+   why this one flow splits across two processes (and two brokers --
+   RabbitMQ here, not the Redis flow 3's rate limiting uses) instead of
+   running entirely within the request like flows 3-5.
 
 Keeping flows 1-4 separate from each other is what makes "every read
 request queries Postgres directly, nothing cached in the app" viable
@@ -187,34 +188,66 @@ the DB row -- is `IndexingService.add_product`, the *same* method flow
 just calls it from a different process, later:
 
 - **Producer** (`app/queue.py`, imported by `api/products.py`, so part
-  of the API process): owns the RQ `Queue` and one function,
-  `enqueue_import_job`, that pushes a job onto Redis. Jobs are
-  enqueued by string reference (`"app.jobs.import_product_job"`), not
-  a direct Python import of `app.jobs` -- so the API process never
-  needs to import `IndexingService`/`ClipModel` for this feature at
-  all, keeping the "API process never touches CLIP for anything but
-  `/search`" property flows 3-5 already had.
+  of the API process): opens a short-lived `pika` connection per call
+  and publishes one JSON message per product (the image bytes
+  base64-encoded inside it -- AMQP messages are just bytes) to a
+  *durable* queue, `delivery_mode=2` (persistent). The API process
+  never imports `app.jobs`/`IndexingService`/`ClipModel` for this
+  feature at all, keeping the "API process never touches CLIP for
+  anything but `/search`" property flows 3-5 already had -- there's no
+  string-reference trick needed here (unlike an in-process task queue)
+  since the message itself, not a Python callable, is what crosses the
+  process boundary.
 - **Consumer** (`app/jobs.py` + `scripts/run_worker.py`, the `worker`
   docker-compose service -- never imported by the API process):
   `run_worker.py` calls `jobs.init_services()` once at process
   startup, loading CLIP and opening a DB pool exactly like
-  `app.main`'s `lifespan` does for the API -- then starts an RQ work
-  loop that calls `jobs.import_product_job` once per queued item, each
-  of which just delegates to `IndexingService.add_product`.
+  `app.main`'s `lifespan` does for the API -- then opens its own
+  `pika` connection and consumes from the same queue, decoding each
+  message (`jobs.handle_message`) and calling
+  `jobs.import_product_job`, which delegates to
+  `IndexingService.add_product`.
 
-**Why `SimpleWorker`, not RQ's default `Worker`.** RQ's default
-`Worker` forks a child process per job (useful for isolating crashes/
-memory leaks between jobs). That's actively dangerous here: this
-worker holds a live psycopg connection pool and a loaded CLIP model in
-memory, initialized once at startup specifically so jobs don't pay
-that cost repeatedly. Forking after that duplicates the pool's open
-socket into the child, which is a well-known way to corrupt a
-connection both processes now think they own. `SimpleWorker` runs jobs
-in-process, one at a time, no fork -- exactly the "load once at
-startup, reuse for every job" model `init_services()` is built around,
-and entirely adequate at this POC's scale (a queue depth in the tens
-or hundreds, not a throughput target that needs multiple worker
-processes).
+**Why RabbitMQ, not the Redis already used for rate limiting.** Two
+different jobs with two different durability requirements, kept in two
+different failure domains on purpose. Rate-limit counters
+(`app/rate_limit.py`) are ephemeral by design -- losing them on a
+restart just means limits reset to zero, a non-event. A queued product
+import is real, expected work: a caller (a Magento export) published
+it and expects it to actually happen, eventually, even across a worker
+restart. Redis *can* be made to serve as a durable queue (`rpoplpush`
+patterns, or a library like RQ built on top of it), but that's Redis
+doing something outside its core design center; RabbitMQ's whole job
+is exactly this -- durable queues, per-message acknowledgment, and
+automatic redelivery of unacked messages -- built in, not layered on.
+Coupling the queue to the rate-limiting Redis would also mean "Redis is
+down" and "the import pipeline is down" become the same incident,
+which they have no real reason to be.
+
+**One message in flight at a time, acked only after success.**
+`scripts/run_worker.py` sets `channel.basic_qos(prefetch_count=1)` and
+only calls `channel.basic_ack(...)` *after* `jobs.handle_message`
+returns without raising. Concurrency was never the goal -- this
+worker holds a single loaded CLIP model and a single psycopg
+connection pool, initialized once at startup specifically so jobs
+don't pay that cost repeatedly, and nothing about either is safe for
+concurrent use, so `prefetch_count=1` isn't a throughput compromise,
+it's the only correct setting. The ack-after-success ordering is what
+actually buys something: if `import_product_job` hits a genuinely
+unexpected error (Postgres unreachable, a bug), it re-raises instead
+of swallowing it (unlike the two *expected* failure modes below); that
+exception propagates out of `_on_message`, out of `start_consuming()`,
+and out of the script entirely -- the message is never acked, so
+RabbitMQ holds onto it and redelivers it once a worker reconnects, and
+`docker-compose.yml`'s `restart: unless-stopped` on the `worker`
+service is what makes "a worker reconnects" actually happen
+automatically rather than requiring a human to notice and restart it.
+Verified directly: stopped the `worker` container, queued a product
+via `POST /products/import`, confirmed the RabbitMQ management API
+showed `messages_persistent: 1` on the `product_import` queue while
+the worker was down, then restarted `worker` and confirmed the message
+was consumed and the product imported within about a second of
+reconnecting.
 
 **Validation is split deliberately between the two sides.** Everything
 checkable without touching Postgres or CLIP -- is the JSON well-formed,
@@ -222,29 +255,33 @@ do `products`/`files` counts match, does each item satisfy
 `BulkProductItem`'s constraints, is the batch within
 `MAX_BULK_IMPORT_ITEMS`, is each file a supported content type --
 happens synchronously in `api/products.py`, *before* anything is
-queued, so an obviously malformed batch fails the whole request with a
-specific error instead of partially queuing garbage. Everything that
-genuinely requires the DB or CLIP -- does this `sku` already exist, is
-this file actually a decodable image -- can only be discovered once a
-worker processes the job, so it happens there instead, and is *logged*
-rather than surfaced back to the caller (see below).
+published, so an obviously malformed batch fails the whole request
+with a specific error instead of partially queuing garbage. Everything
+that genuinely requires the DB or CLIP -- does this `sku` already
+exist, is this file actually a decodable image -- can only be
+discovered once a worker processes the job, so it happens there
+instead, and (being a permanent, not transient, failure) is *logged
+and acked*, not retried (see below).
 
-**Fire-and-forget is a deliberate scope decision, not an oversight.**
-There is no `GET /products/import/{batch_id}` status endpoint. Each
-job sets `app.logging_config.request_id_var` to
+**Fire-and-forget is a deliberate scope decision for *outcomes*, not
+for *durability*, and not an oversight.** There is no
+`GET /products/import/{batch_id}` status endpoint. Each job sets
+`app.logging_config.request_id_var` to
 `f"import-{batch_id}-{item_index}"` before calling `add_product` (the
 same mechanism `RequestContextMiddleware` uses for HTTP requests, just
 driven manually here since there's no request), so every log line for
-one item -- success or a caught `FileExistsError`/`ValueError` -- is
-correlated and grep-able (`docker-compose logs worker | grep
+one item -- success, or a caught `FileExistsError`/`ValueError` that
+gets acked as "done" because retrying it would just fail identically
+-- is correlated and grep-able (`docker-compose logs worker | grep
 <batch_id>`), but that correlation lives only in logs, not in any
-queryable job-status store. A production version handling a partner
-integration like this would likely want a persisted per-item status
-(RQ's own result backend already stores outcomes for a configurable
-TTL, which `enqueue_import_job` doesn't currently expose) so Magento
-itself could ask "did SKU X import successfully" instead of a human
-grepping logs. Revisit if the answer to "does Magento need to know
-per-item outcomes" changes.
+queryable job-status store. What bulk import does *not* fire-and-forget
+is whether the work happens at all -- that's the ack/redelivery
+mechanism above. A production version handling a partner integration
+like this would likely still want a persisted per-item status (a
+result table, or a dead-letter queue for permanent failures instead of
+just logging them) so Magento itself could ask "did SKU X import
+successfully" instead of a human grepping logs. Revisit if the answer
+to "does Magento need to know per-item outcomes" changes.
 
 ## Why embeddings are pre-normalized
 
@@ -281,13 +318,13 @@ loaded.
 | Infra | `app/rate_limit.py` | The single Redis-backed `slowapi` `Limiter` instance, keyed by client IP. Endpoints import it to set their own `@limiter.limit(...)`; `main.py` wires the shared exception handler/middleware once. |
 | Infra | `app/logging_config.py` | Configures the root logger once (`configure_logging`, called first thing in `main.py` *and* `scripts/run_worker.py`); owns `request_id_var` (a `ContextVar`) and the filter that stamps it onto every log record. Pins noisy third-party loggers to `WARNING`. |
 | Infra | `app/middleware.py` | `RequestContextMiddleware` -- sets `request_id_var` for HTTP requests. Assigns/propagates a request ID, logs one access-log line per request with timing, sets the `X-Request-ID` response header. Registered as the outermost middleware. (`app/jobs.py` sets the same `ContextVar` its own way, for queued jobs instead of requests.) |
-| Infra | `app/queue.py` | **Bulk-import producer**, imported only by `api/products.py`. Owns the RQ `Queue` and `enqueue_import_job`, which pushes a job by string reference (`"app.jobs.import_product_job"`) -- the API process never imports `app.jobs`/`IndexingService`/`ClipModel` for this feature. |
-| Infra | `app/jobs.py` | **Bulk-import consumer**, imported only by `scripts/run_worker.py` (never the API process). `init_services()` loads CLIP + opens a DB pool once, eagerly, for the worker's whole lifetime; `import_product_job` calls `IndexingService.add_product` per queued item, catching/logging `FileExistsError`/`ValueError` instead of raising (fire-and-forget). |
+| Infra | `app/queue.py` | **Bulk-import producer**, imported only by `api/products.py`. `enqueue_import_job` opens a short-lived `pika` connection to RabbitMQ (a broker deliberately separate from the rate-limiting Redis) and publishes one durable, persistent JSON message per product -- the API process never imports `app.jobs`/`IndexingService`/`ClipModel` for this feature. |
+| Infra | `app/jobs.py` | **Bulk-import consumer**, imported only by `scripts/run_worker.py` (never the API process). `init_services()` loads CLIP + opens a DB pool once, eagerly, for the worker's whole lifetime. `handle_message` decodes one RabbitMQ message body; `import_product_job` calls `IndexingService.add_product`, catching/logging *permanent* failures (`FileExistsError`/`ValueError`, no point redelivering) but re-raising anything unexpected so the message stays unacked and RabbitMQ redelivers it. |
 | API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a `SEARCH_RATE_LIMIT` limit (CLIP inference is the expensive part). |
 | API | `app/api/products.py` | HTTP concerns only. `GET /products`: plain metadata filtering, `PRODUCTS_RATE_LIMIT`. `POST /products`: validates the upload + form fields (`SKU_PATTERN`, content type), calls `IndexingService.add_product` synchronously, maps `FileExistsError`/`ValueError` to 409/400, `CREATE_PRODUCT_RATE_LIMIT`. `POST /products/import`: validates a whole batch's *shape* synchronously (JSON, counts, per-item fields, file types), then calls `app.queue.enqueue_import_job` per item and returns `202` without waiting, `BULK_IMPORT_RATE_LIMIT`. All three share router-level auth. |
 | Entrypoint | `app/main.py` | Configures logging first, then wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit and request-logging middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. Never imports `app.jobs` (see `app/queue.py`'s row above). |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow (flow 2). |
-| Script | `scripts/run_worker.py` | CLI entrypoint for the `worker` service (flow 6's consumer). Calls `app.jobs.init_services()` once, then runs an RQ `SimpleWorker` work loop -- see [Bulk product import](#bulk-product-import) for why `SimpleWorker` specifically. |
+| Script | `scripts/run_worker.py` | CLI entrypoint for the `worker` service (flow 6's consumer). Calls `app.jobs.init_services()` once, then consumes from RabbitMQ one message at a time (`prefetch_count=1`), acking only after a successful import -- see [Bulk product import](#bulk-product-import) for why. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |
 | Script | `scripts/train_color_adapter.py` | CLI entrypoint for the offline color-adapter-training flow. |
 | Script | `scripts/train_category_classifier.py` | CLI entrypoint for the offline category-classifier-training flow. Reuses `train_color_adapter.py`'s manifest/embedding-cache helpers directly rather than duplicating them. |

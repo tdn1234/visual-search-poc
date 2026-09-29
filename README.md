@@ -64,8 +64,8 @@ visual-search-poc/
 │   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
 │   │   ├── auth.py                  # X-API-Key header check (require_api_key)
 │   │   ├── rate_limit.py            # Redis-backed slowapi Limiter instance
-│   │   ├── queue.py                 # RQ producer: enqueues bulk-import jobs (API process side)
-│   │   ├── jobs.py                  # RQ consumer: the import job itself (worker process side)
+│   │   ├── queue.py                 # RabbitMQ producer: publishes bulk-import jobs (API process side)
+│   │   ├── jobs.py                  # RabbitMQ consumer: the import job itself (worker process side)
 │   │   ├── logging_config.py        # log format + request-ID correlation filter
 │   │   ├── middleware.py            # assigns request IDs, logs one access-log line per request
 │   │   └── schemas/
@@ -189,21 +189,25 @@ Python code above it.
 > All commands below assume you're inside `visual-search-poc/` (the
 > project root, where `docker-compose.yml` lives).
 
-`docker-compose.yml` defines five services: `db` (`pgvector/pgvector:pg16`,
+`docker-compose.yml` defines six services: `db` (`pgvector/pgvector:pg16`,
 the product index), `adminer` (a lightweight DB dashboard for poking at
-`db`), `redis` (backs the request rate limiter *and* the bulk-import
-job queue), `backend` (this API), and `worker` (consumes queued bulk
-imports -- see [Bulk product import](#bulk-product-import-post-productsimport)
-below; same image as `backend`, just a different `command:`, so
+`db`), `redis` (backs the request rate limiter *only*), `rabbitmq`
+(backs the bulk-import job queue -- deliberately a separate broker
+from `redis`, see [Bulk product import](#bulk-product-import-post-productsimport)
+below for why), `backend` (this API), and `worker` (consumes queued
+bulk imports; same image as `backend`, just a different `command:`, so
 `docker-compose build` builds both at once). The API is exposed on
 **host port 8010** (mapped to port 8000 inside the container) so it
 doesn't clash with anything already using 8000 on your machine;
 Postgres is exposed on **host port 5433** (mapped to 5432) so it
 doesn't clash with a Postgres you might already have running locally;
 Adminer is exposed on **host port 8081**; Redis is exposed on **host
-port 6380** (mapped to 6379), same reasoning as Postgres. `worker`
-exposes no ports -- it isn't an HTTP service. Edit the `ports:` lines
-in `docker-compose.yml` if you want different host ports.
+port 6380** (mapped to 6379); RabbitMQ is exposed on **host port
+5673** (AMQP, mapped to 5672) and **host port 15673** (management UI,
+mapped to 15672 -- open `http://127.0.0.1:15673`, login `guest`/`guest`,
+to watch the `product_import` queue's depth). `worker` exposes no
+ports -- it isn't an HTTP service. Edit the `ports:` lines in
+`docker-compose.yml` if you want different host ports.
 
 ### 1. Build the image
 
@@ -294,7 +298,7 @@ port 8081 to the open internet as-is.
 
 | Symptom | Fix |
 |---|---|
-| `port is already allocated` | Something else on your host is using port 8010, 5433, 8081, or 6380. Change the host-side port in `docker-compose.yml`'s `ports:` (e.g. `"8020:8000"`, `"5434:5432"`, `"8082:8080"`, or `"6381:6379"`). |
+| `port is already allocated` | Something else on your host is using port 8010, 5433, 8081, 6380, 5673, or 15673. Change the host-side port in `docker-compose.yml`'s `ports:` (e.g. `"8020:8000"`, `"5434:5432"`, `"8082:8080"`, `"6381:6379"`, `"5674:5672"`, or `"15674:15672"`). |
 | Build hangs/times out downloading torch | Slow network — just retry `docker-compose build`; pip resumes from cache where possible. |
 | `backend` exits/restarts immediately, logs show a Postgres connection error | `db` isn't healthy yet — `docker-compose up -d db` first and wait for `docker-compose ps` to show `(healthy)`, or just re-run `docker-compose up` (the `depends_on` health check should handle this automatically). |
 | `/search` returns 503 "Catalog not indexed yet" | You skipped step 3, or the `products` table is empty — run the `build_embeddings.py` one-off command above. |
@@ -303,27 +307,29 @@ port 8081 to the open internet as-is.
 ## Option B: Local Python setup
 
 > Requires Python 3.12 (3.10+ also works), a reachable Postgres with
-> the `pgvector` extension available, and a reachable Redis. All
-> commands below assume you're inside `visual-search-poc/backend/`.
+> the `pgvector` extension available, a reachable Redis, and a
+> reachable RabbitMQ. All commands below assume you're inside
+> `visual-search-poc/backend/`.
 
-### 0. Start Postgres and Redis
+### 0. Start Postgres, Redis, and RabbitMQ
 
 Easiest path even for "local" development: let Docker run just the
-`db` and `redis` services (from the project root, `visual-search-poc/`),
-and run everything else natively:
+`db`, `redis`, and `rabbitmq` services (from the project root,
+`visual-search-poc/`), and run everything else natively:
 
 ```bash
-docker-compose up -d db redis
+docker-compose up -d db redis rabbitmq
 ```
 
-These listen on `localhost:5433` and `localhost:6380`, which are
-`app/config.py`'s defaults for `DATABASE_URL`/`REDIS_URL` — no extra
-setup needed. Point at different instances by setting those env vars
-yourself, e.g.:
+These listen on `localhost:5433`, `localhost:6380`, and
+`localhost:5673`, which are `app/config.py`'s defaults for
+`DATABASE_URL`/`REDIS_URL`/`RABBITMQ_URL` — no extra setup needed.
+Point at different instances by setting those env vars yourself, e.g.:
 
 ```bash
 export DATABASE_URL="postgresql://user:pass@localhost:5432/visual_search"
 export REDIS_URL="redis://localhost:6379/0"
+export RABBITMQ_URL="amqp://guest:guest@localhost:5672/"
 ```
 
 (Postgres must have the `vector` extension installed — the
@@ -718,9 +724,14 @@ half-written product on disk.
 For importing many products at once (e.g. a Magento catalog export) —
 the batch counterpart to `POST /products`. Send **all** products'
 metadata and photos in a single multipart request; this service embeds
-each one **in the background** via a Redis-backed job queue instead of
-inline, so a large batch can't tie up the API process or blow past an
-HTTP client's timeout waiting for hundreds of CLIP calls to finish.
+each one **in the background** via a RabbitMQ-backed job queue instead
+of inline, so a large batch can't tie up the API process or blow past
+an HTTP client's timeout waiting for hundreds of CLIP calls to finish.
+RabbitMQ here is a dedicated broker, deliberately separate from the
+Redis used for rate limiting elsewhere in this API — see
+[Authentication & rate limiting](#authentication--rate-limiting) for
+that, and `docs/architecture.md`'s "Bulk product import" section for
+why the two aren't the same instance.
 
 ```bash
 curl -X POST "http://127.0.0.1:8010/products/import" \
@@ -748,13 +759,13 @@ order is what determines the pairing. Max batch size is
 reads every file into memory before returning, so an unbounded batch
 would be an easy way to exhaust the API process's memory.
 
-**This is fire-and-forget: there is no status endpoint.** The `202`
-response only confirms the batch was *queued*, not that any individual
-product actually got embedded/stored — that happens later, off the
-request, in the separate `worker` container. Outcomes (including a
-duplicate `sku` or a corrupt image, which are only discoverable once a
-worker actually processes the job) show up **only in the worker's
-logs**, correlated by the `batch_id` from the response:
+**This is fire-and-forget for *outcomes*: there is no status endpoint.**
+The `202` response only confirms the batch was *queued*, not that any
+individual product actually got embedded/stored — that happens later,
+off the request, in the separate `worker` container. Outcomes
+(including a duplicate `sku` or a corrupt image, which are only
+discoverable once a worker actually processes the job) show up **only
+in the worker's logs**, correlated by the `batch_id` from the response:
 
 ```bash
 docker-compose logs worker | grep 8c2f11be4d7a
@@ -768,6 +779,19 @@ docker-compose logs worker | grep 8c2f11be4d7a
 (a skipped duplicate logs a `WARNING` in the same place instead, e.g.
 `Skipped product 'bag-purple' ... already exists`.)
 
+**But it's *not* fire-and-forget about durability.** Each message is
+published to a durable RabbitMQ queue and only acknowledged (removed
+from the queue) after a worker successfully imports it. If the
+`worker` container is down when you call this endpoint, the `202` and
+`batch_id` still come back immediately — the jobs just sit in
+RabbitMQ, visible in the management UI (`http://127.0.0.1:15673`,
+queue `product_import`), until a worker is available to consume them.
+If a worker crashes mid-job, that job was never acked, so RabbitMQ
+redelivers it to the next worker that connects instead of losing it.
+(Verified directly: stopped `worker`, queued a product, confirmed it
+sat in the queue with `messages_persistent: 1`, restarted `worker`,
+confirmed it was consumed and imported within a second of reconnecting.)
+
 **Why a queue instead of just looping `POST /products` N times, or
 processing the batch inline:** either alternative ties up an HTTP
 request (yours, or a script's) for as long as the *whole* batch takes
@@ -778,9 +802,11 @@ partway through a synchronous loop leaves you guessing which ones
 actually landed). Queuing returns in milliseconds regardless of batch
 size and lets a `worker` container absorb the real work independently
 -- see `docs/architecture.md`'s "Bulk product import" section for the
-full design (why `SimpleWorker` specifically, why the worker loads
-CLIP once at startup rather than per job, why validation happens
-synchronously in the request but storage doesn't).
+full design (why RabbitMQ specifically rather than the Redis already
+in the stack, why the worker only processes one message at a time and
+acks after, not before, why the worker loads CLIP once at startup
+rather than per job, why validation happens synchronously in the
+request but storage doesn't).
 
 **Same storage guarantees as `POST /products`:** each import job calls
 the exact same `IndexingService.add_product` the single-product
@@ -1034,7 +1060,7 @@ internals are noise here, not debugging signal — see
 - **V3 (partially done):** Magento 2 integration. The ingestion side
   exists now -- `POST /products` for one product at a time,
   `POST /products/import` for a bulk catalog export/sync, queued
-  through Redis + a `worker` service (see
+  through RabbitMQ + a `worker` service (see
   [Bulk product import](#bulk-product-import-post-productsimport)) so
   large imports don't block. Still needed: the actual Magento-side
   module/observer that calls these endpoints on product save/export,

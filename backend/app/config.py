@@ -51,6 +51,8 @@ API_KEY: str = os.environ.get("API_KEY", "dev-api-key-change-me")
 # Redis backs the request-rate limiter (`slowapi`) so limits are shared
 # across all backend replicas, not just tracked per-process. Default
 # matches docker-compose's `redis` service host port mapping (6380:6379).
+# Rate-limit counters only -- the bulk-import queue uses its own,
+# separate RabbitMQ broker (RABBITMQ_URL below), not this Redis.
 REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6380/0")
 
 # Per-client-IP limits, in `limits`-library syntax (e.g. "20/minute",
@@ -72,14 +74,19 @@ CREATE_PRODUCT_RATE_LIMIT: str = os.environ.get("CREATE_PRODUCT_RATE_LIMIT", "10
 BULK_IMPORT_RATE_LIMIT: str = os.environ.get("BULK_IMPORT_RATE_LIMIT", "5/minute")
 
 # --- Bulk product import (queue) --------------------------------------------
-# POST /products/import enqueues one background job per product onto
-# this Redis-backed RQ queue (see app/queue.py) instead of embedding
+# POST /products/import enqueues one background job per product onto a
+# durable RabbitMQ queue (app/queue.py) instead of embedding
 # synchronously in the request -- see docs/architecture.md's "Bulk
-# product import" section for why. scripts/run_worker.py is the
-# consumer; it must be running (the `worker` docker-compose service)
-# for queued imports to actually happen -- queuing a job never fails
-# just because no worker is currently listening, but nothing processes
-# it until one is.
+# product import" section for why, and specifically why RabbitMQ
+# rather than the Redis already used for rate limiting above (a
+# deliberately separate broker/failure-domain for durable work vs.
+# ephemeral counters). scripts/run_worker.py is the consumer; it must
+# be running (the `worker` docker-compose service) for queued imports
+# to actually happen -- queuing a job never fails just because no
+# worker is currently listening (RabbitMQ holds it durably), but
+# nothing processes it until a worker is up.
+RABBITMQ_URL: str = os.environ.get("RABBITMQ_URL", "amqp://guest:guest@localhost:5673/")
+
 PRODUCT_IMPORT_QUEUE_NAME: str = "product_import"
 
 # Caps how many products one POST /products/import call can enqueue,

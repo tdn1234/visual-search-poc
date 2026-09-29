@@ -46,6 +46,29 @@ services:
     # No volume: rate-limit counters are short-lived and fine to lose
     # on restart -- this isn't a cache/queue that needs durability.
 
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: visual-search-rabbitmq
+    # Dedicated broker for the bulk-import queue (app/queue.py), kept
+    # deliberately separate from `redis` above -- see app/queue.py's
+    # docstring for why. Unlike `redis`, this one IS given a volume:
+    # a queued-but-not-yet-imported product is real work, not a
+    # disposable counter, so it should survive a container restart.
+    ports:
+      # Host port 5673 (not 5672) so this doesn't collide with a
+      # RabbitMQ instance you might already have running locally.
+      - "5673:5672"
+      # Management UI (http://localhost:15673, guest/guest) -- handy
+      # for watching the `product_import` queue's depth while testing.
+      - "15673:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   backend:
     build:
       context: .
@@ -61,6 +84,7 @@ services:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/visual_search
       - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
       # Dev-only default -- override this before exposing the API beyond
       # your own machine (main.py logs a warning at startup if you don't).
       - API_KEY=dev-api-key-change-me
@@ -77,6 +101,8 @@ services:
       db:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     volumes:
       # Live-reload app/script code without rebuilding the image.
@@ -99,17 +125,24 @@ services:
     image: visual-search-poc-backend
     container_name: visual-search-worker
     # Consumes app.config.PRODUCT_IMPORT_QUEUE_NAME (POST /products/import's
-    # jobs). No ports -- this isn't an HTTP service. Loads its own CLIP
-    # model + DB pool independently of `backend` (see app/jobs.py):
-    # a separate process, so it can't reuse the API process's copies.
+    # jobs) from RabbitMQ. No ports -- this isn't an HTTP service, and
+    # no REDIS_URL either -- rate limiting is an API-process concern
+    # only, this worker never touches Redis. Loads its own CLIP model +
+    # DB pool independently of `backend` (see app/jobs.py): a separate
+    # process, so it can't reuse the API process's copies.
+    # Restart automatically if a message-processing crash propagates
+    # out of scripts/run_worker.py (see that script's docstring) --
+    # otherwise the container would just exit and nothing more would
+    # ever get consumed from the queue.
+    restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/visual_search
-      - REDIS_URL=redis://redis:6379/0
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
     depends_on:
       db:
         condition: service_healthy
-      redis:
+      rabbitmq:
         condition: service_healthy
     volumes:
       - ./backend/app:/app/backend/app
@@ -125,3 +158,4 @@ services:
 volumes:
   huggingface_cache:
   pgdata:
+  rabbitmq_data:
