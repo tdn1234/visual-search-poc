@@ -55,12 +55,12 @@ visual-search-poc/
 │   │   │   └── category_classifier.py  # trained category-classification head + loader
 │   │   ├── services/
 │   │   │   ├── embedding_service.py     # bytes/file -> (adapted) embedding
-│   │   │   ├── indexing_service.py      # write path: catalog/ -> Postgres `products` table
+│   │   │   ├── indexing_service.py      # write path: whole-catalog reindex + single-product add
 │   │   │   ├── product_query_service.py # read path: pgvector search + metadata filter, per request
 │   │   │   └── attribute_classifier_service.py  # classify an uploaded image's category/color
 │   │   ├── api/
 │   │   │   ├── search.py            # POST /search route
-│   │   │   └── products.py          # GET /products route
+│   │   │   └── products.py          # GET /products + POST /products (add a product) routes
 │   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
 │   │   ├── auth.py                  # X-API-Key header check (require_api_key)
 │   │   ├── rate_limit.py            # Redis-backed slowapi Limiter instance
@@ -625,6 +625,65 @@ filter alone could ever broaden a search). See the docstring on
 for where the AND/OR split actually lives (two different `WHERE`
 clauses built by `list_products` vs. `search_similar`).
 
+## Adding a product (`POST /products`)
+
+Adds one new product: its metadata plus a photo, which gets embedded
+with the exact same `EmbeddingService` transformation `POST /search`
+uses for query images (through the color adapter too, if one's
+loaded) — so the new product is searchable immediately, no separate
+reindex step needed.
+
+```bash
+curl -X POST "http://127.0.0.1:8010/products" \
+  -H "X-API-Key: dev-api-key-change-me" \
+  -F "sku=bag-purple" \
+  -F "name=Canvas Bag Purple" \
+  -F "price=59.99" \
+  -F "category=Bags" \
+  -F "color=purple" \
+  -F "file=@/path/to/photo.jpg;type=image/jpeg"
+```
+
+```json
+{"sku":"bag-purple","name":"Canvas Bag Purple","price":59.99,"category":"Bags","color":"purple"}
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `sku` | yes | Unique. Lowercase letters/digits/hyphens only (e.g. `bag-purple`) — becomes a literal `catalog/<sku>/` folder name, so this is a path-safety rule, not just style. |
+| `name` | yes | |
+| `price` | yes | Must be > 0. |
+| `category` | yes | |
+| `color` | no | |
+| `file` | yes | JPEG or PNG only (not WEBP, even though `/search` accepts WEBP for *query* images — see below). |
+
+**Why this also writes to `catalog/<sku>/`, not just the database:**
+`scripts/build_embeddings.py` rebuilds the whole `products` table from
+a scan of `catalog/` and **replaces every row**. If a product added
+through this endpoint only existed in the database, the next routine
+reindex would silently delete it. So `IndexingService.add_product`
+writes `catalog/<sku>/image.{jpg,png}` + `catalog/<sku>/metadata.json`
+(the same layout as every other product) *and* inserts the DB row —
+the two stay in sync, and a future reindex picks this product back up
+instead of dropping it. This is also why uploads are restricted to
+JPEG/PNG: `SUPPORTED_IMAGE_NAMES` (what the reindex scan recognizes)
+doesn't include `.webp`.
+
+**Errors:**
+
+| Situation | HTTP status |
+|---|---|
+| `sku` already exists | 409 |
+| Invalid `sku` format, non-positive `price`, or a missing required field | 422 |
+| Unsupported/missing/corrupt image | 400 |
+| Missing/invalid `X-API-Key` | 401 |
+| Rate limit exceeded (`CREATE_PRODUCT_RATE_LIMIT`, default 10/minute — tighter than `GET /products`' 60/minute, since this runs CLIP inference and writes to disk) | 429 |
+
+On any failure *after* the catalog folder was created (e.g. the DB
+insert fails), `IndexingService.add_product` removes that folder again
+before returning the error — a failed request never leaves a
+half-written product on disk.
+
 ## Testing the API
 
 > Use port `8010` if you started the API via Docker (Option A), or
@@ -712,8 +771,9 @@ Every route except `/health` requires an `X-API-Key` header
 |---|---|---|---|
 | `POST /search` | 20/minute | `SEARCH_RATE_LIMIT` | Runs CLIP inference (the expensive part) plus a DB query. |
 | `GET /products` | 60/minute | `PRODUCTS_RATE_LIMIT` | Plain SQL filter, no ML involved — cheap enough for a looser limit. |
+| `POST /products` | 10/minute | `CREATE_PRODUCT_RATE_LIMIT` | Runs CLIP inference *and* writes to disk — the tightest budget of the three. |
 
-Both live in `app/config.py` (env-overridable, same pattern as
+All three live in `app/config.py` (env-overridable, same pattern as
 `API_KEY`/`DATABASE_URL`), in [`limits`-library syntax](https://limits.readthedocs.io/en/stable/quickstart.html#rate-limit-string-notation)
 (`"<count>/<second|minute|hour|day>"`). To change one without touching
 code:
@@ -820,8 +880,10 @@ internals are noise here, not debugging signal — see
 | Non-image file uploaded | 400 | Unsupported file type |
 | Empty file uploaded | 400 | Uploaded file is empty |
 | Corrupted/unreadable image | 400 | Could not encode image with CLIP |
-| `products` table missing or empty | 503 | Catalog not indexed yet — run the build script |
-| Unexpected server error | 500 | Internal error while searching |
+| `products` table missing or empty (`/search`) | 503 | Catalog not indexed yet — run the build script |
+| `sku` already exists (`POST /products`) | 409 | Product '\<sku\>' already exists |
+| Invalid `sku`/`price`/missing field (`POST /products`) | 422 | Pydantic validation error detail |
+| Unexpected server error | 500 | Internal error while searching / creating the product |
 
 ## Future improvements
 

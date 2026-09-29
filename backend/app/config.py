@@ -61,6 +61,10 @@ REDIS_URL: str = os.environ.get("REDIS_URL", "redis://localhost:6380/0")
 # rate limiting" section for the reasoning.
 SEARCH_RATE_LIMIT: str = os.environ.get("SEARCH_RATE_LIMIT", "20/minute")
 PRODUCTS_RATE_LIMIT: str = os.environ.get("PRODUCTS_RATE_LIMIT", "60/minute")
+# POST /products (creating a new product) does an embed + a filesystem
+# write, not just a SQL query -- closer in cost to /search than to
+# GET /products, so it gets its own (tighter) budget.
+CREATE_PRODUCT_RATE_LIMIT: str = os.environ.get("CREATE_PRODUCT_RATE_LIMIT", "10/minute")
 
 # --- Search configuration ---------------------------------------------------
 TOP_K_RESULTS: int = 5
@@ -69,3 +73,9 @@ TOP_K_RESULTS: int = 5
 SUPPORTED_IMAGE_NAMES: tuple[str, ...] = ("image.jpg", "image.jpeg", "image.png")
 
 METADATA_FILENAME: str = "metadata.json"
+
+# A new product's `sku` becomes a literal catalog/<sku>/ folder name
+# (see IndexingService.add_product), so this doubles as a path-traversal
+# guard, not just a style rule: lowercase letters/digits/hyphens only,
+# no leading/trailing hyphen, no "..", "/", or "\".
+SKU_PATTERN: str = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"

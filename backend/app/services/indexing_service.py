@@ -1,9 +1,18 @@
 """Indexing service.
 
-Responsibility: the offline *write* path for the product index --
-scan `catalog/`, compute an embedding per product, and replace the
-`products` table in Postgres. Run manually via
-`scripts/build_embeddings.py`, never by the running API.
+Responsibility: the *write* path for the product index -- everything
+that turns a product photo into a row in the `products` table. Two
+distinct flows live here:
+
+- `build_index`: offline, whole-catalog. Scans `catalog/`, embeds
+  every product photo, and replaces the entire `products` table. Run
+  manually via `scripts/build_embeddings.py`, never by the running API.
+- `add_product`: online, single-product. Used by `POST /products` to
+  add exactly one new product without touching any other row. It also
+  writes into `catalog/<sku>/` (image + metadata.json), not just the
+  DB -- otherwise the next offline `build_index` run (which *replaces*
+  the whole table from a catalog-folder scan) would silently delete
+  any product that only ever existed in the database.
 
 This is the only module that knows about the on-disk catalog layout
 (`catalog/<sku>/image.jpg` + `catalog/<sku>/metadata.json`). The read
@@ -17,8 +26,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 from pathlib import Path
 
+from psycopg import errors as psycopg_errors
 from psycopg_pool import ConnectionPool
 
 from app.config import METADATA_FILENAME, SUPPORTED_IMAGE_NAMES
@@ -88,6 +99,115 @@ class IndexingService:
         self._replace_all(records)
         logger.info("Wrote %d product embeddings to Postgres", len(records))
         return records
+
+    def add_product(
+        self,
+        catalog_dir: Path,
+        sku: str,
+        name: str,
+        price: float,
+        category: str,
+        color: str | None,
+        image_bytes: bytes,
+        image_filename: str,
+    ) -> ProductRecord:
+        """Add exactly one new product: persist it to `catalog/<sku>/` and the `products` table.
+
+        Unlike `build_index` (whole-catalog, offline, replaces every
+        row), this touches only the one new row -- the online
+        counterpart used by `POST /products`. Writing to `catalog_dir`
+        too (not just the DB) keeps this product from being silently
+        dropped the next time `build_index` rebuilds the whole table
+        from a catalog-folder scan.
+
+        On any failure, the `catalog_dir / sku` folder is removed
+        again (best-effort) so a partial product never lingers on disk
+        without a corresponding DB row.
+
+        Args:
+            catalog_dir: Catalog root (e.g. `app.config.CATALOG_DIR`).
+            sku: Unique product identifier. Also becomes a literal
+                folder name, so callers must have already validated it
+                against `app.config.SKU_PATTERN` -- this method trusts
+                it rather than re-validating (that's an HTTP-layer
+                concern, not a storage one).
+            name: Human-readable product name.
+            price: Product price.
+            category: Product category, e.g. "Shoes".
+            color: Dominant product color, or `None`.
+            image_bytes: Raw bytes of the product photo.
+            image_filename: Filename to store the photo under, e.g.
+                `"image.jpg"` -- must be one of `SUPPORTED_IMAGE_NAMES`
+                so a later `build_index` scan picks it back up.
+
+        Returns:
+            The `ProductRecord` that was written.
+
+        Raises:
+            FileExistsError: If `sku` already has a catalog folder, or
+                already exists as a DB row (e.g. a race between two
+                concurrent requests for the same new sku).
+            ValueError: If `image_bytes` is not a valid image.
+        """
+        product_dir = catalog_dir / sku
+        if product_dir.exists():
+            raise FileExistsError(f"Product '{sku}' already exists.")
+
+        product_dir.mkdir(parents=True)
+        try:
+            image_path = product_dir / image_filename
+            image_path.write_bytes(image_bytes)
+
+            metadata: dict[str, object] = {
+                "sku": sku,
+                "name": name,
+                "price": price,
+                "category": category,
+            }
+            if color:
+                metadata["color"] = color
+            with (product_dir / METADATA_FILENAME).open("w", encoding="utf-8") as file:
+                json.dump(metadata, file, indent=2)
+
+            embedding = self._embedding_service.embed_image_bytes(image_bytes)
+            record = ProductRecord(
+                sku=sku,
+                name=name,
+                price=price,
+                category=category,
+                color=color,
+                image_path=str(image_path.relative_to(catalog_dir.parent)),
+                embedding=embedding,
+            )
+            self._insert_one(record)
+        except Exception:
+            shutil.rmtree(product_dir, ignore_errors=True)
+            raise
+
+        logger.info("Added new product '%s' via POST /products", sku)
+        return record
+
+    def _insert_one(self, record: ProductRecord) -> None:
+        """Insert exactly one new row. Raises `FileExistsError` if `sku` already exists."""
+        with self._db_pool.connection() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO products (sku, name, price, category, color, image_path, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        record.sku,
+                        record.name,
+                        record.price,
+                        record.category,
+                        record.color,
+                        record.image_path,
+                        record.embedding,
+                    ),
+                )
+            except psycopg_errors.UniqueViolation as exc:
+                raise FileExistsError(f"Product '{record.sku}' already exists.") from exc
 
     def _replace_all(self, records: list[ProductRecord]) -> None:
         """Atomically swap the whole `products` table for `records`."""

@@ -48,9 +48,9 @@ CLIP or pgvector at all, just a plain SQL `WHERE` filter
 (`ProductQueryService.list_products`) over the `products` table's
 metadata columns.
 
-## Four separate flows
+## Five separate flows
 
-There are deliberately **four independent flows** that never run in
+There are deliberately **five independent flows** that never run in
 the same request:
 
 1. **Offline adapter/classifier training**
@@ -87,21 +87,72 @@ the same request:
 4. **Online metadata browsing** (`GET /products`, served by FastAPI) —
    no CLIP involved at all, just a plain SQL `WHERE` filter
    (`ProductQueryService.list_products`) over the `products` table's
-   `category`/`color` columns. The simplest and fastest of the four
+   `category`/`color` columns. The simplest and fastest of the five
    flows.
 
-Keeping the offline flows separate from the online ones is what makes
-"every request queries Postgres directly, nothing cached in the app"
-viable without a per-request performance hit: the `products` table
-(and its HNSW index) is rebuilt in batch by flow 2, so flows 3 and 4
-only ever do cheap, index-backed reads. It's also why flow 2 must be
-re-run after flow 1 changes the color adapter checkpoint — otherwise
-the catalog's stored embeddings and freshly-adapted query embeddings
-would be in different (non-comparable) vector spaces. (The category
+5. **Online product creation** (`POST /products`, served by FastAPI) —
+   the one flow that's both online *and* a write. Embeds the uploaded
+   photo (same `EmbeddingService` transformation as flow 3, so the new
+   product is immediately comparable against everything flow 2 already
+   indexed) and calls `IndexingService.add_product`, which writes
+   `catalog/<sku>/` (image + metadata.json) *and* inserts one row into
+   `products` -- both, not just the DB row, specifically so flow 2
+   doesn't silently delete this product on its next full rebuild (see
+   [Why product creation also writes to disk](#why-product-creation-also-writes-to-disk)
+   below).
+
+Keeping flows 1-4 separate from each other is what makes "every read
+request queries Postgres directly, nothing cached in the app" viable
+without a per-request performance hit: the `products` table (and its
+HNSW index) is rebuilt in batch by flow 2, so flows 3 and 4 only ever
+do cheap, index-backed reads. It's also why flow 2 must be re-run
+after flow 1 changes the color adapter checkpoint — otherwise the
+catalog's stored embeddings and freshly-adapted query embeddings would
+be in different (non-comparable) vector spaces. (The category
 classifier doesn't have this constraint -- it only classifies the
 *uploaded* image at query time, never touches stored catalog
 embeddings, so retraining it takes effect immediately on API restart,
-no reindex needed.)
+no reindex needed.) Flow 5 is the odd one out precisely because it's a
+write that happens online -- see the dedicated section below for how
+it stays consistent with flow 2 rather than fighting it.
+
+## Why product creation also writes to disk
+
+`IndexingService.add_product` (flow 5) writes `catalog/<sku>/image.{jpg,png}`
+and `catalog/<sku>/metadata.json` -- the exact same layout every other
+product already has -- *in addition to* inserting the new row into
+Postgres. That's not redundancy for its own sake; it's what keeps flow
+5 from being quietly undone by flow 2.
+
+`IndexingService.build_index` (flow 2, `scripts/build_embeddings.py`)
+doesn't merge or upsert -- it scans `catalog/` and **replaces the
+entire `products` table** (`TRUNCATE` + bulk insert) from whatever it
+finds there. That's a deliberate, pre-existing design choice: it makes
+"the catalog folder is the single source of truth for a full rebuild"
+unambiguous, with no drift between what's on disk and what's in the
+table. But it means anything that only ever reached the database --
+skipping the catalog folder -- would vanish the next time someone runs
+a routine reindex, with no error or warning, because from flow 2's
+point of view that product never existed.
+
+So `add_product` treats the catalog folder as no less authoritative
+than the database: both get written, in that order (folder first,
+since it's simpler to detect "already exists" and to clean up on
+failure), and if anything after the folder write fails -- writing
+`metadata.json`, embedding the photo, or the DB insert itself -- the
+partially-created folder is removed again (`shutil.rmtree`) before the
+error propagates. A caller never sees `201 Created` for a product that
+isn't durably in *both* places, and a failed request never leaves an
+orphaned folder for a later `build_index` run to trip over.
+
+The tradeoff this accepts: `add_product` isn't atomic across the
+filesystem and Postgres in the strict sense (a crash between the folder
+write and the DB insert -- as opposed to a caught exception, which
+*is* cleaned up -- could theoretically leave an orphaned folder). For
+a POC this is an acceptable gap; a production version would want
+either a two-phase write (temp folder + atomic rename) or to treat
+`catalog/` as a cache rebuildable from Postgres instead of the other
+way around.
 
 ## Why embeddings are pre-normalized
 
@@ -131,7 +182,7 @@ loaded.
 | Model | `app/models/category_classifier.py` | `CategoryClassifier` (linear head) + `load_category_classifier`, same load-or-`None` pattern. |
 | Service | `app/services/embedding_service.py` | Turns raw bytes or a file path into an embedding, applying the color adapter (if loaded) after CLIP. Validates images. |
 | Service | `app/services/attribute_classifier_service.py` | Classifies an *uploaded* image's own category/color (zero-shot for color, `CategoryClassifier` for category) -- a different concern from ranking. |
-| Service | `app/services/indexing_service.py` | **Write path.** Knows the catalog folder layout and the Postgres `products` table schema. Scans `catalog/`, embeds every image, and replaces the table (run offline, by `scripts/build_embeddings.py`, never by the API). |
+| Service | `app/services/indexing_service.py` | **Write path.** Knows the catalog folder layout and the Postgres `products` table schema. `build_index`: offline, whole-catalog replace (run by `scripts/build_embeddings.py`, never by the API). `add_product`: online, single-product add (`POST /products`) -- writes `catalog/<sku>/` *and* inserts one DB row, with rollback (folder removal) on failure. |
 | Service | `app/services/product_query_service.py` | **Read path.** Every SQL query `/search` and `/products` need: pgvector nearest-neighbor search (`search_similar`, category/color OR-filtered), plain metadata filtering (`list_products`, AND), and small helper queries (`count`, `distinct_categories`, `distinct_colors`). No caching, no in-memory catalog -- every call hits Postgres. |
 | Infra | `app/db.py` | Owns the psycopg connection pool, registers pgvector's Python adapter, and ensures the `vector` extension/`products` table/HNSW index exist. The only module that imports psycopg. |
 | Infra | `app/auth.py` | `require_api_key`, a FastAPI dependency checking the `X-API-Key` header against `API_KEY`. Applied at the router level in `api/search.py`/`api/products.py`, not per-route. |
@@ -139,7 +190,7 @@ loaded.
 | Infra | `app/logging_config.py` | Configures the root logger once (`configure_logging`, called first thing in `main.py`); owns `request_id_var` (a `ContextVar`) and the filter that stamps it onto every log record. Pins noisy third-party loggers to `WARNING`. |
 | Infra | `app/middleware.py` | `RequestContextMiddleware` -- the only thing that sets `request_id_var`. Assigns/propagates a request ID, logs one access-log line per request with timing, sets the `X-Request-ID` response header. Registered as the outermost middleware. |
 | API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a `SEARCH_RATE_LIMIT` limit (CLIP inference is the expensive part). |
-| API | `app/api/products.py` | HTTP concerns only: plain metadata filtering, no image/embedding involved at all. Router-level auth + a looser `PRODUCTS_RATE_LIMIT`. |
+| API | `app/api/products.py` | HTTP concerns only. `GET /products`: plain metadata filtering, no image/embedding involved, `PRODUCTS_RATE_LIMIT`. `POST /products`: validates the upload + form fields (`SKU_PATTERN`, content type), calls `IndexingService.add_product`, maps `FileExistsError`/`ValueError` to 409/400; its own tighter `CREATE_PRODUCT_RATE_LIMIT`. Both share router-level auth. |
 | Entrypoint | `app/main.py` | Configures logging first, then wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit and request-logging middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow. |
 | Script | `scripts/generate_training_data.py` | CLI entrypoint that generates the synthetic color/category training set. |

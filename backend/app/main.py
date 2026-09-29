@@ -35,6 +35,7 @@ from app.models.color_adapter import load_color_adapter
 from app.rate_limit import limiter
 from app.services.attribute_classifier_service import AttributeClassifierService
 from app.services.embedding_service import EmbeddingService
+from app.services.indexing_service import IndexingService
 from app.services.product_query_service import ProductQueryService
 
 configure_logging()
@@ -67,6 +68,7 @@ async def lifespan(app: FastAPI):
 
     embedding_service = EmbeddingService(clip_model=clip_model, color_adapter=color_adapter)
     product_query_service = ProductQueryService(db_pool=db_pool)
+    indexing_service = IndexingService(embedding_service=embedding_service, db_pool=db_pool)
     attribute_classifier_service = AttributeClassifierService(
         clip_model=clip_model, category_classifier=category_classifier
     )
@@ -76,6 +78,7 @@ async def lifespan(app: FastAPI):
     app.state.db_pool = db_pool
     app.state.embedding_service = embedding_service
     app.state.product_query_service = product_query_service
+    app.state.indexing_service = indexing_service
     app.state.attribute_classifier_service = attribute_classifier_service
 
     yield
