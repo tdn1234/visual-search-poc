@@ -3,4 +3,7 @@
     <publisher topic="visualsearch.product.sync">
         <connection name="db" exchange="magento-db"/>
     </publisher>
+    <publisher topic="visualsearch.event.track">
+        <connection name="db" exchange="magento-db"/>
+    </publisher>
 </config>

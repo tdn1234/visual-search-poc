@@ -77,6 +77,26 @@
                     <comment>Restrict results to the color the service detects in the uploaded image.</comment>
                 </field>
             </group>
+
+            <group id="recommendations" translate="label" type="text" sortOrder="40" showInDefault="1" showInWebsite="0" showInStore="0">
+                <label>Personalized Recommendations</label>
+                <depends><field id="visual_search/general/enabled">1</field></depends>
+                <field id="track_events" translate="label comment" type="select" sortOrder="10" showInDefault="1">
+                    <label>Track Shopper Events</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Report product views, add-to-carts and purchases to the service, keyed by an anonymous shopper id (customer id, or a first-party cookie for guests). Turn on before "Show Recommendations" so history builds up. Requires the "visualsearch.event.track" queue consumer. Check your cookie-consent and privacy policy first.</comment>
+                </field>
+                <field id="enabled" translate="label comment" type="select" sortOrder="20" showInDefault="1">
+                    <label>Show "Recommended for you"</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Adds a personalized block to the home page and product pages, loaded by AJAX so it works with full-page cache.</comment>
+                </field>
+                <field id="limit" translate="label comment" type="text" sortOrder="30" showInDefault="1">
+                    <label>Products to Show</label>
+                    <validate>validate-digits validate-digits-range digits-range-1-20</validate>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+            </group>
         </section>
     </system>
 </config>

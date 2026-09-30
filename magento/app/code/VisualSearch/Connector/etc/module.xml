@@ -5,6 +5,7 @@
             <module name="Magento_Catalog"/>
             <module name="Magento_CatalogSearch"/>
             <module name="Magento_Ui"/>
+            <module name="Magento_Customer"/>
         </sequence>
     </module>
 </config>

@@ -52,3 +52,38 @@
     font-size: 12px;
     color: #2e7d32;
 }
+
+/* "Recommended for you" (js/recommendations.js) */
+.visualsearch-recs {
+    margin: 32px 0;
+}
+.visualsearch-recs__title {
+    margin: 0 0 16px;
+}
+.visualsearch-recs__list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 20px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.visualsearch-recs__item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.visualsearch-recs__link {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-decoration: none;
+}
+.visualsearch-recs__link img {
+    width: 100%;
+    height: auto;
+    object-fit: cover;
+}
+.visualsearch-recs__price {
+    font-weight: 700;
+}

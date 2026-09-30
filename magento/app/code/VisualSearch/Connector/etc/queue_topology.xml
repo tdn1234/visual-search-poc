@@ -2,5 +2,6 @@
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework-message-queue:etc/topology.xsd">
     <exchange name="magento-db" connection="db" type="topic">
         <binding id="visualsearchProductSync" topic="visualsearch.product.sync" destinationType="queue" destination="visualsearch.product.sync"/>
+        <binding id="visualsearchEventTrack" topic="visualsearch.event.track" destinationType="queue" destination="visualsearch.event.track"/>
     </exchange>
 </config>

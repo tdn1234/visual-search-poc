@@ -3,12 +3,11 @@ declare(strict_types=1);
 
 namespace VisualSearch\Connector\Block\Search;
 
-use Magento\Catalog\Helper\Image as ImageHelper;
 use Magento\Catalog\Model\Product;
-use Magento\Framework\Pricing\Helper\Data as PricingHelper;
 use Magento\Framework\View\Element\Template;
 use Magento\Framework\View\Element\Template\Context;
 use VisualSearch\Connector\Model\Config;
+use VisualSearch\Connector\Model\Search\ProductPresenter;
 use VisualSearch\Connector\Model\Search\ResultHolder;
 
 /**
@@ -22,8 +21,7 @@ class Result extends Template
         Context $context,
         private readonly Config $config,
         private readonly ResultHolder $resultHolder,
-        private readonly ImageHelper $imageHelper,
-        private readonly PricingHelper $pricingHelper,
+        private readonly ProductPresenter $presenter,
         array $data = []
     ) {
         parent::__construct($context, $data);
@@ -44,13 +42,12 @@ class Result extends Template
 
     public function getImageUrl(Product $product): string
     {
-        return $this->imageHelper->init($product, 'category_page_grid')->getUrl();
+        return $this->presenter->getImageUrl($product);
     }
 
     public function getPriceHtml(Product $product): string
     {
-        $price = $product->getData('minimal_price') ?? $product->getFinalPrice();
-        return $this->pricingHelper->currency((float)$price, true, false);
+        return $this->presenter->getFormattedPrice($product);
     }
 
     /** Cosine similarity in [-1, 1] shown as a 0-100 "match" percentage. */

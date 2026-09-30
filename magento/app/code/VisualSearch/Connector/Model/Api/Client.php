@@ -95,6 +95,36 @@ class Client
     }
 
     /**
+     * POST /events -- record shopper behavior (view / add_to_cart / purchase).
+     *
+     * @param array<int, array{shopper_id: string, sku: string, event_type: string, occurred_at?: string}> $events
+     *        1-100 events
+     * @throws ApiException
+     */
+    public function trackEvents(array $events): Response
+    {
+        return $this->request('POST', '/events', ['json' => ['events' => array_values($events)]]);
+    }
+
+    /**
+     * GET /recommendations -- personalized products for one shopper.
+     * Response strategy is "personalized", "popular" (cold start) or "none".
+     *
+     * @param string[] $excludeSkus API skus never to return (e.g. the product page being viewed)
+     * @throws ApiException
+     */
+    public function getRecommendations(string $shopperId, int $limit, array $excludeSkus = []): Response
+    {
+        // FastAPI reads a list as a *repeated* parameter (exclude_sku=a&exclude_sku=b), but
+        // Guzzle's array query support would send exclude_sku[0]=a -- so build the string by hand.
+        $query = http_build_query(['shopper_id' => $shopperId, 'limit' => $limit]);
+        foreach ($excludeSkus as $sku) {
+            $query .= '&exclude_sku=' . rawurlencode($sku);
+        }
+        return $this->request('GET', '/recommendations', ['query' => $query]);
+    }
+
+    /**
      * @param array<string, mixed> $options Guzzle request options
      * @throws ApiException
      */

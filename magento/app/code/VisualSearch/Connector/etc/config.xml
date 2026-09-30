@@ -18,6 +18,11 @@
                 <match_category>0</match_category>
                 <match_color>0</match_color>
             </search>
+            <recommendations>
+                <track_events>1</track_events>
+                <enabled>0</enabled>
+                <limit>6</limit>
+            </recommendations>
         </visual_search>
     </default>
 </config>

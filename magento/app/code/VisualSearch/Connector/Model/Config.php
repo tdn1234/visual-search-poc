@@ -22,6 +22,9 @@ class Config
     private const PATH_LOG_RETENTION = 'visual_search/sync/log_retention_days';
     private const PATH_MATCH_CATEGORY = 'visual_search/search/match_category';
     private const PATH_MATCH_COLOR = 'visual_search/search/match_color';
+    private const PATH_TRACK_EVENTS = 'visual_search/recommendations/track_events';
+    private const PATH_RECOMMENDATIONS = 'visual_search/recommendations/enabled';
+    private const PATH_RECOMMENDATION_LIMIT = 'visual_search/recommendations/limit';
 
     /** The API rejects import batches larger than this (MAX_BULK_IMPORT_ITEMS default). */
     public const MAX_CHUNK_SIZE = 100;
@@ -87,5 +90,21 @@ class Config
     public function shouldMatchColor(): bool
     {
         return $this->scopeConfig->isSetFlag(self::PATH_MATCH_COLOR);
+    }
+
+    /** Whether shopper behavior (views, add-to-cart, purchases) is reported to the service. */
+    public function isTrackingEnabled(): bool
+    {
+        return $this->isEnabled() && $this->scopeConfig->isSetFlag(self::PATH_TRACK_EVENTS);
+    }
+
+    public function areRecommendationsEnabled(): bool
+    {
+        return $this->isEnabled() && $this->scopeConfig->isSetFlag(self::PATH_RECOMMENDATIONS);
+    }
+
+    public function getRecommendationLimit(): int
+    {
+        return min(20, max(1, (int)$this->scopeConfig->getValue(self::PATH_RECOMMENDATION_LIMIT) ?: 6));
     }
 }

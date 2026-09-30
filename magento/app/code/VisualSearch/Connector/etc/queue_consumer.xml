@@ -5,4 +5,9 @@
               connection="db"
               maxMessages="100"
               handler="VisualSearch\Connector\Model\Queue\Consumer::process"/>
+    <consumer name="visualsearch.event.track"
+              queue="visualsearch.event.track"
+              connection="db"
+              maxMessages="500"
+              handler="VisualSearch\Connector\Model\Queue\EventConsumer::process"/>
 </config>

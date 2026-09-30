@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<!-- Product page: report the view, and show personalized recommendations (both via AJAX: the page is full-page-cached). -->
+<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:View/Layout/etc/page_configuration.xsd">
+    <head>
+        <css src="VisualSearch_Connector::css/visualsearch.css"/>
+    </head>
+    <body>
+        <referenceContainer name="content">
+            <block class="VisualSearch\Connector\Block\ProductTracker" name="visualsearch.product.tracker" after="-"/>
+            <block class="VisualSearch\Connector\Block\Recommendations" name="visualsearch.recommendations" after="-"/>
+        </referenceContainer>
+    </body>
+</page>

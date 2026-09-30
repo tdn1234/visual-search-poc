@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!-- Home page: personalized "Recommended for you" (filled in by AJAX, so full-page cache is safe). -->
+<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:View/Layout/etc/page_configuration.xsd">
+    <head>
+        <css src="VisualSearch_Connector::css/visualsearch.css"/>
+    </head>
+    <body>
+        <referenceContainer name="content">
+            <block class="VisualSearch\Connector\Block\Recommendations" name="visualsearch.recommendations" after="-"/>
+        </referenceContainer>
+    </body>
+</page>
