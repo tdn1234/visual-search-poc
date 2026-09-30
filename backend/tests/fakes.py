@@ -18,8 +18,9 @@ from app.schemas.search import ProductSummary, SearchResult
 class FakeResult:
     """What `conn.execute(...)` returns: just `fetchone`/`fetchall`."""
 
-    def __init__(self, rows: list[tuple]) -> None:
+    def __init__(self, rows: list[tuple], rowcount: int = 0) -> None:
         self._rows = rows
+        self.rowcount = rowcount
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
@@ -53,7 +54,7 @@ class FakeConnection:
         self._pool.calls.append(("execute", sql, params))
         if self._pool.execute_error is not None:
             raise self._pool.execute_error
-        return FakeResult(self._pool.results.pop(0) if self._pool.results else [])
+        return FakeResult(self._pool.results.pop(0) if self._pool.results else [], self._pool.rowcount)
 
     def cursor(self) -> FakeCursor:
         return FakeCursor(self._pool)
@@ -66,9 +67,12 @@ class FakePool:
     rows. `calls` records every statement as `(kind, sql, params)`.
     """
 
-    def __init__(self, results: list[list[tuple]] | None = None, execute_error: Exception | None = None) -> None:
+    def __init__(
+        self, results: list[list[tuple]] | None = None, execute_error: Exception | None = None, rowcount: int = 0
+    ) -> None:
         self.results = list(results or [])
         self.execute_error = execute_error
+        self.rowcount = rowcount  # what `conn.execute(...).rowcount` reports (e.g. rows a DELETE removed)
         self.calls: list[tuple] = []
 
     @contextmanager
@@ -188,3 +192,38 @@ class FakeIndexingService:
             image_path=f"catalog/{kwargs['sku']}/{kwargs['image_filename']}",
             embedding=[0.1, 0.2],
         )
+
+
+class FakeRecommendationService:
+    """Stands in for `RecommendationService` in API tests; records call kwargs."""
+
+    def __init__(self) -> None:
+        from app.schemas.recommendation import RecommendationItem
+
+        self.strategy = "personalized"
+        self.recommendations = [
+            RecommendationItem(sku="shoe-blue", name="Blue Shoe", price=89.0, category="Shoes", score=0.83)
+        ]
+        self.deleted = 4
+        self.error: Exception | None = None
+        self.recorded_batches: list[list] = []
+        self.recommend_calls: list[dict] = []
+        self.delete_calls: list[str] = []
+
+    def record_events(self, events):
+        if self.error:
+            raise self.error
+        self.recorded_batches.append(list(events))
+        return len(events)
+
+    def recommend(self, **kwargs):
+        if self.error:
+            raise self.error
+        self.recommend_calls.append(kwargs)
+        return self.strategy, self.recommendations
+
+    def delete_shopper_events(self, shopper_id):
+        if self.error:
+            raise self.error
+        self.delete_calls.append(shopper_id)
+        return self.deleted

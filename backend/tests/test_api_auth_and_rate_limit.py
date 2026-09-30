@@ -5,7 +5,15 @@ import pytest
 
 @pytest.mark.parametrize(
     ("method", "path"),
-    [("get", "/products"), ("post", "/products"), ("post", "/products/import"), ("post", "/search")],
+    [
+        ("get", "/products"),
+        ("post", "/products"),
+        ("post", "/products/import"),
+        ("post", "/search"),
+        ("post", "/events"),
+        ("get", "/recommendations"),
+        ("delete", "/shoppers/c1/events"),
+    ],
 )
 def test_every_protected_route_rejects_a_missing_key(client, method, path):
     assert getattr(client, method)(path).status_code == 401

@@ -24,6 +24,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
 from app.api.products import router as products_router
+from app.api.recommendations import router as recommendations_router
 from app.api.search import router as search_router
 from app.config import API_KEY, CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE
 from app.db import create_pool
@@ -37,6 +38,7 @@ from app.services.attribute_classifier_service import AttributeClassifierService
 from app.services.embedding_service import EmbeddingService
 from app.services.indexing_service import IndexingService
 from app.services.product_query_service import ProductQueryService
+from app.services.recommendation_service import RecommendationService
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -69,6 +71,7 @@ async def lifespan(app: FastAPI):
     embedding_service = EmbeddingService(clip_model=clip_model, color_adapter=color_adapter)
     product_query_service = ProductQueryService(db_pool=db_pool)
     indexing_service = IndexingService(embedding_service=embedding_service, db_pool=db_pool)
+    recommendation_service = RecommendationService(db_pool=db_pool)
     attribute_classifier_service = AttributeClassifierService(
         clip_model=clip_model, category_classifier=category_classifier
     )
@@ -80,6 +83,7 @@ async def lifespan(app: FastAPI):
     app.state.product_query_service = product_query_service
     app.state.indexing_service = indexing_service
     app.state.attribute_classifier_service = attribute_classifier_service
+    app.state.recommendation_service = recommendation_service
 
     yield
 
@@ -105,6 +109,7 @@ app.add_middleware(RequestContextMiddleware)
 
 app.include_router(search_router)
 app.include_router(products_router)
+app.include_router(recommendations_router)
 
 
 @app.get("/health", tags=["health"])

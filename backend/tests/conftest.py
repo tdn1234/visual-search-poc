@@ -31,6 +31,7 @@ from tests.fakes import (  # noqa: E402
     FakeEmbeddingService,
     FakeIndexingService,
     FakeProductQueryService,
+    FakeRecommendationService,
 )
 
 
@@ -74,12 +75,14 @@ def services():
             "product_query": FakeProductQueryService(),
             "attribute_classifier": FakeAttributeClassifier(),
             "indexing": FakeIndexingService(),
+            "recommendation": FakeRecommendationService(),
         },
     )()
     app.state.embedding_service = fakes.embedding
     app.state.product_query_service = fakes.product_query
     app.state.attribute_classifier_service = fakes.attribute_classifier
     app.state.indexing_service = fakes.indexing
+    app.state.recommendation_service = fakes.recommendation
     return fakes
 
 

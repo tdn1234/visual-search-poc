@@ -35,6 +35,24 @@ CREATE TABLE IF NOT EXISTS products (
 
 CREATE INDEX IF NOT EXISTS products_embedding_idx
     ON products USING hnsw (embedding vector_cosine_ops);
+
+-- Shopper behavior for personalized recommendations. Deliberately NO
+-- foreign key to products: `IndexingService.build_index` TRUNCATEs
+-- `products` on every full reindex (a FK would block that), and an event
+-- may arrive for a product that isn't indexed yet. Events whose sku isn't
+-- in `products` are simply ignored when recommendations are computed.
+CREATE TABLE IF NOT EXISTS shopper_events (
+    id BIGSERIAL PRIMARY KEY,
+    shopper_id TEXT NOT NULL,
+    sku TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS shopper_events_shopper_idx
+    ON shopper_events (shopper_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS shopper_events_created_idx
+    ON shopper_events (created_at);
 """
 
 

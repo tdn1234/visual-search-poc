@@ -94,6 +94,45 @@ PRODUCT_IMPORT_QUEUE_NAME: str = "product_import"
 # an unbounded batch is an easy way to exhaust the API process's memory.
 MAX_BULK_IMPORT_ITEMS: int = int(os.environ.get("MAX_BULK_IMPORT_ITEMS", "100"))
 
+# --- Personalized recommendations --------------------------------------------
+# A storefront (e.g. the Magento connector) reports what shoppers do via
+# POST /events; GET /recommendations turns one shopper's recent history
+# into a "taste vector" (a decayed, weighted average of the embeddings of
+# the products they interacted with) and returns the nearest products.
+# See docs/architecture.md's "Personalized recommendations" section.
+#
+# How strongly each signal pulls the taste vector: buying says far more
+# about taste than glancing at a product page.
+EVENT_WEIGHTS: dict[str, float] = {"view": 1.0, "add_to_cart": 3.0, "purchase": 5.0}
+
+# An event's weight halves every this-many days, so recent behavior
+# dominates and old interests fade rather than sticking forever.
+RECOMMEND_HALF_LIFE_DAYS: float = float(os.environ.get("RECOMMEND_HALF_LIFE_DAYS", "14"))
+
+# Events older than this are ignored entirely (also bounds the popularity fallback).
+RECOMMEND_WINDOW_DAYS: int = int(os.environ.get("RECOMMEND_WINDOW_DAYS", "90"))
+
+# Only a shopper's N most recent events feed the taste vector -- bounds
+# per-request work no matter how much history a heavy shopper has.
+RECOMMEND_MAX_HISTORY: int = int(os.environ.get("RECOMMEND_MAX_HISTORY", "50"))
+
+RECOMMEND_DEFAULT_LIMIT: int = 6
+RECOMMEND_MAX_LIMIT: int = 20
+
+# Events accepted per POST /events call.
+MAX_EVENTS_PER_REQUEST: int = 100
+
+# Opaque shopper identifier chosen by the client (e.g. "c42" for customer
+# 42, "g<random>" for a guest cookie). Deliberately not an email/name: the
+# service never needs to know who a shopper *is*, only which events belong
+# together. Also keeps the id safe to use in a URL path.
+SHOPPER_ID_PATTERN: str = r"^[A-Za-z0-9_-]{1,64}$"
+
+# Storefront traffic all arrives from one client IP (the shop's server),
+# so these are far higher than the per-user budgets on /search.
+EVENTS_RATE_LIMIT: str = os.environ.get("EVENTS_RATE_LIMIT", "600/minute")
+RECOMMENDATIONS_RATE_LIMIT: str = os.environ.get("RECOMMENDATIONS_RATE_LIMIT", "300/minute")
+
 # --- Search configuration ---------------------------------------------------
 TOP_K_RESULTS: int = 5
 
