@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:Acl/etc/acl.xsd">
+    <acl>
+        <resources>
+            <resource id="Magento_Backend::admin">
+                <resource id="VisualSearch_Connector::visualsearch" title="Visual Search" sortOrder="90">
+                    <resource id="VisualSearch_Connector::sync" title="Sync Products" sortOrder="10"/>
+                    <resource id="VisualSearch_Connector::logs" title="View Sync Logs" sortOrder="20"/>
+                </resource>
+                <resource id="Magento_Backend::stores">
+                    <resource id="Magento_Backend::stores_settings">
+                        <resource id="Magento_Config::config">
+                            <resource id="VisualSearch_Connector::config" title="Visual Search Configuration" sortOrder="90"/>
+                        </resource>
+                    </resource>
+                </resource>
+            </resource>
+        </resources>
+    </acl>
+</config>

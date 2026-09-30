@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Store:etc/config.xsd">
+    <default>
+        <visual_search>
+            <general>
+                <enabled>0</enabled>
+                <api_url>http://localhost:8000</api_url>
+                <timeout>30</timeout>
+            </general>
+            <sync>
+                <auto_sync>1</auto_sync>
+                <auto_sync_mode>immediate</auto_sync_mode>
+                <chunk_size>50</chunk_size>
+                <color_attribute>color</color_attribute>
+                <log_retention_days>30</log_retention_days>
+            </sync>
+            <search>
+                <match_category>0</match_category>
+                <match_color>0</match_color>
+            </search>
+        </visual_search>
+    </default>
+</config>

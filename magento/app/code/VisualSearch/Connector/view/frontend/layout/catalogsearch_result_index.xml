@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<!-- The standard Magento search results page: add the image-upload form above the text results. -->
+<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:View/Layout/etc/page_configuration.xsd">
+    <head>
+        <css src="VisualSearch_Connector::css/visualsearch.css"/>
+    </head>
+    <body>
+        <referenceContainer name="content">
+            <block class="VisualSearch\Connector\Block\Search\Form" name="visualsearch.form" before="-"/>
+        </referenceContainer>
+    </body>
+</page>

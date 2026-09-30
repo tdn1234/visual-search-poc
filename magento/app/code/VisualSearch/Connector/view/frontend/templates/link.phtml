@@ -1,0 +1,7 @@
+<?php
+/** @var \VisualSearch\Connector\Block\Link $block */
+/** @var \Magento\Framework\Escaper $escaper */
+?>
+<li class="link visualsearch-link">
+    <a href="<?= $escaper->escapeUrl($block->getSearchUrl()) ?>"><?= $escaper->escapeHtml(__('Search by Image')) ?></a>
+</li>

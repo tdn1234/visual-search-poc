@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Backend:etc/menu.xsd">
+    <menu>
+        <add id="VisualSearch_Connector::logs" title="Visual Search Sync Log" module="VisualSearch_Connector"
+             sortOrder="90" parent="Magento_Catalog::catalog" action="visualsearch/log"
+             resource="VisualSearch_Connector::logs"/>
+    </menu>
+</config>

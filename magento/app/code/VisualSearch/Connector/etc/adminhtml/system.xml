@@ -1,0 +1,82 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Config:etc/system_file.xsd">
+    <system>
+        <section id="visual_search" translate="label" type="text" sortOrder="900" showInDefault="1" showInWebsite="0" showInStore="0">
+            <class>separator-top</class>
+            <label>Visual Search</label>
+            <tab>service</tab>
+            <resource>VisualSearch_Connector::config</resource>
+
+            <group id="general" translate="label" type="text" sortOrder="10" showInDefault="1" showInWebsite="0" showInStore="0">
+                <label>Connection</label>
+                <field id="enabled" translate="label comment" type="select" sortOrder="10" showInDefault="1">
+                    <label>Enable Module</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Master switch: when off, nothing is synced and the storefront image search is hidden.</comment>
+                </field>
+                <field id="api_url" translate="label comment" type="text" sortOrder="20" showInDefault="1">
+                    <label>API Base URL</label>
+                    <comment>Base URL of the visual search service, e.g. http://localhost:8000 (no trailing slash needed).</comment>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+                <field id="api_key" translate="label comment" type="obscure" sortOrder="30" showInDefault="1">
+                    <label>API Key</label>
+                    <backend_model>Magento\Config\Model\Config\Backend\Encrypted</backend_model>
+                    <comment>Sent as the X-API-Key header. Stored encrypted.</comment>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+                <field id="timeout" translate="label comment" type="text" sortOrder="40" showInDefault="1">
+                    <label>Request Timeout (seconds)</label>
+                    <validate>validate-digits validate-greater-than-zero</validate>
+                    <comment>Single-product sync and search embed images with CLIP, so allow a few seconds.</comment>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+            </group>
+
+            <group id="sync" translate="label" type="text" sortOrder="20" showInDefault="1" showInWebsite="0" showInStore="0">
+                <label>Product Sync</label>
+                <depends><field id="visual_search/general/enabled">1</field></depends>
+                <field id="auto_sync" translate="label comment" type="select" sortOrder="10" showInDefault="1">
+                    <label>Sync Product on Save</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Sync a product to the visual search service whenever it is saved.</comment>
+                </field>
+                <field id="auto_sync_mode" translate="label comment" type="select" sortOrder="20" showInDefault="1">
+                    <label>On-Save Sync Mode</label>
+                    <source_model>VisualSearch\Connector\Model\Source\AutoSyncMode</source_model>
+                    <comment>"Immediate" calls the API during the save (adds a second or two). "Queue" hands it to the Magento queue consumer instead.</comment>
+                    <depends><field id="auto_sync">1</field></depends>
+                </field>
+                <field id="chunk_size" translate="label comment" type="text" sortOrder="30" showInDefault="1">
+                    <label>Bulk Sync Batch Size</label>
+                    <validate>validate-digits validate-digits-range digits-range-1-100</validate>
+                    <comment>Products per API import request (1-100; the API caps a batch at 100).</comment>
+                </field>
+                <field id="color_attribute" translate="label comment" type="text" sortOrder="40" showInDefault="1">
+                    <label>Color Attribute Code</label>
+                    <comment>Product attribute whose value is sent as the product color. Leave empty to send none.</comment>
+                </field>
+                <field id="log_retention_days" translate="label comment" type="text" sortOrder="50" showInDefault="1">
+                    <label>Keep Sync Logs (days)</label>
+                    <validate>validate-digits validate-greater-than-zero</validate>
+                    <comment>Older log rows are deleted daily by cron.</comment>
+                </field>
+            </group>
+
+            <group id="search" translate="label" type="text" sortOrder="30" showInDefault="1" showInWebsite="0" showInStore="0">
+                <label>Search by Image</label>
+                <depends><field id="visual_search/general/enabled">1</field></depends>
+                <field id="match_category" translate="label comment" type="select" sortOrder="10" showInDefault="1">
+                    <label>Only Match Detected Category</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Restrict results to the category the service detects in the uploaded image.</comment>
+                </field>
+                <field id="match_color" translate="label comment" type="select" sortOrder="20" showInDefault="1">
+                    <label>Only Match Detected Color</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Restrict results to the color the service detects in the uploaded image.</comment>
+                </field>
+            </group>
+        </section>
+    </system>
+</config>

@@ -1,0 +1,12 @@
+<?xml version="1.0"?>
+<page layout="1column" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:View/Layout/etc/page_configuration.xsd">
+    <head>
+        <css src="VisualSearch_Connector::css/visualsearch.css"/>
+    </head>
+    <body>
+        <referenceContainer name="content">
+            <block class="VisualSearch\Connector\Block\Search\Form" name="visualsearch.form"/>
+            <block class="VisualSearch\Connector\Block\Search\Result" name="visualsearch.results" after="visualsearch.form"/>
+        </referenceContainer>
+    </body>
+</page>

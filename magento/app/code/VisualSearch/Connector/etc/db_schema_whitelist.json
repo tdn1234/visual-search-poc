@@ -1,0 +1,37 @@
+{
+    "visual_search_sync_log": {
+        "column": {
+            "log_id": true,
+            "product_id": true,
+            "sku": true,
+            "api_sku": true,
+            "sync_type": true,
+            "status": true,
+            "http_status": true,
+            "batch_id": true,
+            "message": true,
+            "duration_ms": true,
+            "created_at": true,
+            "updated_at": true
+        },
+        "index": {
+            "VISUAL_SEARCH_SYNC_LOG_PRODUCT_ID": true,
+            "VISUAL_SEARCH_SYNC_LOG_STATUS": true,
+            "VISUAL_SEARCH_SYNC_LOG_CREATED_AT": true
+        },
+        "constraint": {
+            "PRIMARY": true
+        }
+    },
+    "visual_search_product_map": {
+        "column": {
+            "product_id": true,
+            "api_sku": true,
+            "synced_at": true
+        },
+        "constraint": {
+            "PRIMARY": true,
+            "VISUAL_SEARCH_PRODUCT_MAP_API_SKU": true
+        }
+    }
+}

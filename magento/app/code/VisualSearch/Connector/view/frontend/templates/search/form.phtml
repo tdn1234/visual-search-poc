@@ -1,0 +1,20 @@
+<?php
+/** @var \VisualSearch\Connector\Block\Search\Form $block */
+/** @var \Magento\Framework\Escaper $escaper */
+?>
+<div class="visualsearch-form">
+    <form action="<?= $escaper->escapeUrl($block->getActionUrl()) ?>" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="form_key" value="<?= $escaper->escapeHtmlAttr($block->getFormKey()) ?>"/>
+        <label for="visualsearch-image" class="visualsearch-form__label">
+            <?= $escaper->escapeHtml(__('Or find similar products with a photo')) ?>
+        </label>
+        <div class="visualsearch-form__row">
+            <input type="file" id="visualsearch-image" name="image"
+                   accept="image/jpeg,image/png,image/webp" required="required"/>
+            <button type="submit" class="action primary">
+                <span><?= $escaper->escapeHtml(__('Search by Image')) ?></span>
+            </button>
+        </div>
+        <p class="visualsearch-form__hint"><?= $escaper->escapeHtml(__('JPEG, PNG or WEBP, up to 5 MB.')) ?></p>
+    </form>
+</div>

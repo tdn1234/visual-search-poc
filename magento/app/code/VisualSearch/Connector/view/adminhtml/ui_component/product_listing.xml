@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<listing xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Ui:etc/ui_configuration.xsd">
+    <listingToolbar name="listing_top">
+        <massaction name="listing_massaction">
+            <action name="visualsearch_sync">
+                <settings>
+                    <url path="visualsearch/sync/massSync"/>
+                    <type>visualsearch_sync</type>
+                    <label translate="true">Sync to Visual Search</label>
+                    <confirm>
+                        <title translate="true">Sync to Visual Search</title>
+                        <message translate="true">Queue the selected products for sync to the visual search service?</message>
+                    </confirm>
+                </settings>
+            </action>
+        </massaction>
+    </listingToolbar>
+</listing>

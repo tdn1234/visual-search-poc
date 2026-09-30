@@ -1,0 +1,23 @@
+{
+    "name": "visualsearch/module-connector",
+    "description": "Connects Magento 2 to the visual-search-poc API: product sync (single, on-save, bulk via queue), sync logs, and search by image.",
+    "type": "magento2-module",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.1",
+        "magento/framework": "*",
+        "magento/module-catalog": "*",
+        "magento/module-catalog-search": "*",
+        "magento/module-config": "*",
+        "magento/module-ui": "*",
+        "guzzlehttp/guzzle": "^7.0"
+    },
+    "autoload": {
+        "files": [
+            "registration.php"
+        ],
+        "psr-4": {
+            "VisualSearch\\Connector\\": ""
+        }
+    }
+}

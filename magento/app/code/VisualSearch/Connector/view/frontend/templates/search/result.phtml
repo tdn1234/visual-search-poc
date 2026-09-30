@@ -1,0 +1,32 @@
+<?php
+/** @var \VisualSearch\Connector\Block\Search\Result $block */
+/** @var \Magento\Framework\Escaper $escaper */
+
+$results = $block->getResults();
+$error = $block->getError();
+?>
+<?php if ($error): ?>
+    <div class="message error"><div><?= $escaper->escapeHtml($error) ?></div></div>
+<?php elseif ($results === []): ?>
+    <div class="message info empty">
+        <div><?= $escaper->escapeHtml(__('No similar products found. Try a clearer photo of a single item.')) ?></div>
+    </div>
+<?php elseif ($results): ?>
+    <ol class="visualsearch-results">
+        <?php foreach ($results as $hit): ?>
+            <?php $product = $hit['product']; ?>
+            <li class="visualsearch-results__item">
+                <a href="<?= $escaper->escapeUrl($product->getProductUrl()) ?>" class="visualsearch-results__link">
+                    <img src="<?= $escaper->escapeUrl($block->getImageUrl($product)) ?>"
+                         alt="<?= $escaper->escapeHtmlAttr($product->getName()) ?>"
+                         loading="lazy" width="240" height="300"/>
+                    <span class="visualsearch-results__name"><?= $escaper->escapeHtml($product->getName()) ?></span>
+                </a>
+                <span class="visualsearch-results__price"><?= $escaper->escapeHtml($block->getPriceHtml($product)) ?></span>
+                <span class="visualsearch-results__match">
+                    <?= $escaper->escapeHtml(__('%1% match', $block->getMatchPercent($hit['score']))) ?>
+                </span>
+            </li>
+        <?php endforeach; ?>
+    </ol>
+<?php endif; ?>

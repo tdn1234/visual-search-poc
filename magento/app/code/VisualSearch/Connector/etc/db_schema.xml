@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<schema xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="urn:magento:framework:Setup/Declaration/Schema/etc/schema.xsd">
+    <table name="visual_search_sync_log" resource="default" engine="innodb" comment="Visual Search sync attempts">
+        <column xsi:type="int" name="log_id" unsigned="true" nullable="false" identity="true" comment="Log ID"/>
+        <column xsi:type="int" name="product_id" unsigned="true" nullable="false" comment="Magento product entity ID"/>
+        <column xsi:type="varchar" name="sku" nullable="false" length="64" comment="Magento SKU"/>
+        <column xsi:type="varchar" name="api_sku" nullable="true" length="128" comment="SKU as sent to the visual search API"/>
+        <column xsi:type="varchar" name="sync_type" nullable="false" length="16" comment="manual | auto | bulk"/>
+        <column xsi:type="varchar" name="status" nullable="false" length="16" comment="pending | queued | success | skipped | failed"/>
+        <column xsi:type="smallint" name="http_status" unsigned="true" nullable="true" comment="HTTP status returned by the API"/>
+        <column xsi:type="varchar" name="batch_id" nullable="true" length="32" comment="Batch ID returned by POST /products/import"/>
+        <column xsi:type="text" name="message" nullable="true" comment="Human-readable outcome"/>
+        <column xsi:type="int" name="duration_ms" unsigned="true" nullable="true" comment="API call duration"/>
+        <column xsi:type="timestamp" name="created_at" nullable="false" default="CURRENT_TIMESTAMP" comment="Created At"/>
+        <column xsi:type="timestamp" name="updated_at" nullable="false" default="CURRENT_TIMESTAMP" on_update="true" comment="Updated At"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="log_id"/>
+        </constraint>
+        <index referenceId="VISUAL_SEARCH_SYNC_LOG_PRODUCT_ID" indexType="btree">
+            <column name="product_id"/>
+        </index>
+        <index referenceId="VISUAL_SEARCH_SYNC_LOG_STATUS" indexType="btree">
+            <column name="status"/>
+        </index>
+        <index referenceId="VISUAL_SEARCH_SYNC_LOG_CREATED_AT" indexType="btree">
+            <column name="created_at"/>
+        </index>
+    </table>
+    <table name="visual_search_product_map" resource="default" engine="innodb" comment="Magento product to visual search API SKU">
+        <column xsi:type="int" name="product_id" unsigned="true" nullable="false" identity="false" comment="Magento product entity ID"/>
+        <column xsi:type="varchar" name="api_sku" nullable="false" length="128" comment="SKU used in the visual search API"/>
+        <column xsi:type="timestamp" name="synced_at" nullable="false" default="CURRENT_TIMESTAMP" on_update="true" comment="Last sync"/>
+        <constraint xsi:type="primary" referenceId="PRIMARY">
+            <column name="product_id"/>
+        </constraint>
+        <constraint xsi:type="unique" referenceId="VISUAL_SEARCH_PRODUCT_MAP_API_SKU">
+            <column name="api_sku"/>
+        </constraint>
+    </table>
+</schema>

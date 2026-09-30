@@ -1,0 +1,161 @@
+<?php
+declare(strict_types=1);
+
+namespace VisualSearch\Connector\Model\Api;
+
+use GuzzleHttp\ClientFactory;
+use GuzzleHttp\Exception\GuzzleException;
+use VisualSearch\Connector\Model\Config;
+
+/**
+ * Thin HTTP client for the visual-search-poc API (backend/app/api/*.py).
+ *
+ * Knows the wire format only -- multipart field names, query params, the
+ * X-API-Key header -- and returns a {@see Response} for *any* HTTP status so
+ * callers decide what a 409 or 429 means. Only transport failures throw.
+ *
+ * A "payload" here is the array produced by
+ * {@see \VisualSearch\Connector\Model\ProductPayloadBuilder::build()}.
+ */
+class Client
+{
+    public function __construct(
+        private readonly Config $config,
+        private readonly ClientFactory $clientFactory
+    ) {
+    }
+
+    /**
+     * POST /products -- synchronous; embeds the photo before responding.
+     * 201 = created, 409 = sku already exists.
+     *
+     * @param array<string, mixed> $payload
+     * @throws ApiException
+     */
+    public function createProduct(array $payload): Response
+    {
+        return $this->request('POST', '/products', ['multipart' => array_merge(
+            $this->metaFields($payload['meta']),
+            [$this->filePart('file', $payload)]
+        )]);
+    }
+
+    /**
+     * POST /products/import -- asynchronous; 202 + batch_id, the service's
+     * worker embeds each product later. `products[i]` pairs with `files[i]`.
+     *
+     * @param array<int, array<string, mixed>> $payloads (max 100 -- the API's batch cap)
+     * @throws ApiException
+     */
+    public function importProducts(array $payloads): Response
+    {
+        $multipart = [[
+            'name' => 'products',
+            'contents' => (string)json_encode(array_map(
+                static fn (array $payload): array => [
+                    'sku' => $payload['meta']['sku'],
+                    'name' => $payload['meta']['name'],
+                    'price' => (float)$payload['meta']['price'],
+                    'category' => $payload['meta']['category'],
+                    'color' => $payload['meta']['color'] ?? null,
+                ],
+                $payloads
+            )),
+        ]];
+        foreach ($payloads as $payload) {
+            $multipart[] = $this->filePart('files', $payload);
+        }
+        return $this->request('POST', '/products/import', ['multipart' => $multipart]);
+    }
+
+    /**
+     * POST /search -- top-K visually similar products for an uploaded image.
+     *
+     * @throws ApiException
+     */
+    public function searchByImage(
+        string $imageBytes,
+        string $mime,
+        string $filename,
+        bool $matchCategory,
+        bool $matchColor
+    ): Response {
+        return $this->request('POST', '/search', [
+            'query' => [
+                'match_category' => $matchCategory ? 'true' : 'false',
+                'match_color' => $matchColor ? 'true' : 'false',
+            ],
+            'multipart' => [[
+                'name' => 'file',
+                'filename' => $filename,
+                'contents' => $imageBytes,
+                'headers' => ['Content-Type' => $mime],
+            ]],
+        ]);
+    }
+
+    /**
+     * @param array<string, mixed> $options Guzzle request options
+     * @throws ApiException
+     */
+    private function request(string $method, string $path, array $options): Response
+    {
+        $baseUrl = $this->config->getApiUrl();
+        if ($baseUrl === '') {
+            throw new ApiException('Visual search API URL is not configured.');
+        }
+
+        $client = $this->clientFactory->create(['config' => [
+            'base_uri' => $baseUrl . '/',
+            'timeout' => $this->config->getTimeout(),
+            'connect_timeout' => 5,
+            'http_errors' => false,
+            'headers' => ['X-API-Key' => $this->config->getApiKey(), 'Accept' => 'application/json'],
+        ]]);
+
+        try {
+            $httpResponse = $client->request($method, ltrim($path, '/'), $options);
+        } catch (GuzzleException $e) {
+            throw new ApiException('Visual search API is unreachable: ' . $e->getMessage(), 0, $e);
+        }
+
+        $decoded = json_decode((string)$httpResponse->getBody(), true);
+        $retryAfter = $httpResponse->getHeaderLine('Retry-After');
+
+        return new Response(
+            $httpResponse->getStatusCode(),
+            is_array($decoded) ? $decoded : [],
+            ctype_digit($retryAfter) ? (int)$retryAfter : null
+        );
+    }
+
+    /**
+     * @param array<string, mixed> $meta
+     * @return array<int, array{name: string, contents: string}>
+     */
+    private function metaFields(array $meta): array
+    {
+        $fields = [];
+        foreach (['sku', 'name', 'price', 'category', 'color'] as $key) {
+            // Optional `color` is omitted rather than sent empty.
+            if (($meta[$key] ?? null) !== null && $meta[$key] !== '') {
+                $fields[] = ['name' => $key, 'contents' => (string)$meta[$key]];
+            }
+        }
+        return $fields;
+    }
+
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    private function filePart(string $fieldName, array $payload): array
+    {
+        return [
+            'name' => $fieldName,
+            'filename' => $payload['filename'],
+            'contents' => $payload['image'],
+            'headers' => ['Content-Type' => $payload['mime']],
+        ];
+    }
+}
