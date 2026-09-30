@@ -82,8 +82,13 @@ visual-search-poc/
 │   │   ├── category_classifier.pt   # trained classifier weights (optional, generated)
 │   │   ├── training/                # synthetic + imported real training set (generated)
 │   │   └── real_training/           # your real photos to import (gitignored, you provide)
+│   ├── tests/                       # pytest unit suite (fakes only: no Postgres/Redis/RabbitMQ/CLIP)
+│   ├── pytest.ini
 │   ├── requirements.txt
+│   ├── requirements-dev.txt         # requirements.txt + pytest/httpx
 │   └── Dockerfile
+├── magento/                         # Magento 2 module (VisualSearch_Connector) that talks to this API
+│   └── app/code/VisualSearch/Connector/
 ├── docker-compose.yml
 ├── catalog/
 │   ├── shoe-red/
@@ -93,6 +98,7 @@ visual-search-poc/
 ├── docs/
 │   ├── architecture.md
 │   └── sample_embeddings.json       # illustrative format only
+├── LEARNING_PATH.txt                # Magento dev -> AI engineer study plan applied to this project
 └── README.md
 ```
 
@@ -837,6 +843,37 @@ Duplicate `sku`, a corrupt image the content-type header didn't catch,
 or any other failure only a worker can detect — **not** in this table,
 because they never reach the HTTP response; see the worker-logs note
 above.
+
+## Magento 2 integration
+
+`magento/app/code/VisualSearch/Connector/` is a Magento 2.4 module that
+connects a store to this API: admin config (URL, API key, on/off),
+manual single-product sync, automatic sync on product save, bulk sync
+through a Magento queue (→ `POST /products/import`), a sync-log admin
+grid, and search by image on the storefront (→ `POST /search`).
+
+Setup, config, the queue consumer, log statuses, and known limits (no
+update/delete endpoint yet, per-IP rate limits shared by all shoppers)
+are in [`magento/README.md`](magento/README.md); the design is in
+[`docs/architecture.md`](docs/architecture.md#magento-connector).
+
+## Running the unit tests
+
+```bash
+cd backend
+pip install -r requirements-dev.txt    # requirements.txt + pytest/httpx (Python 3.12)
+python -m pytest
+```
+
+The suite (`backend/tests/`) needs **no running Postgres, Redis,
+RabbitMQ, or CLIP download** — those are replaced with small fakes
+(`tests/fakes.py`), so it runs in a couple of seconds. It covers the
+SQL each query builds, catalog indexing and its cleanup-on-failure
+behavior, the queue message format, the worker job's
+swallow-vs-redeliver failure split, request-ID middleware, and every
+API route's validation, status codes, auth, and rate limiting. What it
+deliberately does *not* cover is the real model and database — for
+that, use the manual checks below.
 
 ## Testing the API
 

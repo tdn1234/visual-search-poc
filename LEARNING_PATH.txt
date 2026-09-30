@@ -1,0 +1,401 @@
+=====================================================================
+LEARNING PATH: MAGENTO DEVELOPER -> AI ENGINEER
+Applied to the visual-search-poc project (pgvector, FastAPI-style API,
+RabbitMQ bulk import, catalog/ folder with metadata.json per product)
+=====================================================================
+
+---------------------------------------------------------------------
+0. HOW TO USE THIS DOCUMENT
+---------------------------------------------------------------------
+- Work through the phases in order. Each phase has:
+    * WHY it matters
+    * WHAT to learn (topics + resources)
+    * WHAT TO BUILD in this project (concrete tasks)
+    * DONE WHEN (a measurable exit criterion)
+- Time estimates assume 2-3 hours per day (about 2.5h x 6 days = ~15
+  hours per week, 1 rest day) alongside a full-time job. Total plan is
+  roughly 355 hours of focused work.
+- Rule of thumb: every phase must end with a NUMBER that improved
+  (recall@5, latency, cost, throughput). No number = not finished.
+- Keep an experiment log (docs/experiments.md): date, change, metric
+  before/after, conclusion. This becomes your portfolio.
+
+Your Magento strengths that transfer directly:
+  - Product catalog modelling (attributes, categories, configurable products)
+  - Search (Elasticsearch/OpenSearch, layered navigation, facets)
+  - Queues and async processing (message queue consumers)
+  - REST/GraphQL APIs, caching, performance tuning
+  - Import/export pipelines, cron, indexers
+
+Your gaps to close:
+  - Python data stack, linear algebra basics
+  - ML evaluation methodology (this is the biggest one)
+  - Embeddings / vector search internals
+  - LLM application patterns
+  - GPU/model serving and cost awareness
+
+---------------------------------------------------------------------
+PHASE 1: PYTHON + DATA + MATH FOUNDATIONS   (~40h, ~2.5 weeks)
+---------------------------------------------------------------------
+WHY
+  Every later phase is done in Python notebooks and scripts. You need
+  to be comfortable manipulating arrays and reading model code.
+
+LEARN
+  - Python: virtualenv/uv, typing, dataclasses, async/await, pytest
+  - NumPy: arrays, broadcasting, dot product, norms, argsort/top-k
+  - pandas: DataFrame, groupby, merge, reading JSON/CSV
+  - Jupyter notebooks, matplotlib basics
+  - Linear algebra (just enough):
+      * vector, matrix, dot product, L2 norm
+      * cosine similarity vs euclidean distance vs inner product
+      * why normalized vectors make cosine == dot product
+  - Probability/statistics basics: mean, variance, confidence interval
+    (needed later to tell whether a metric change is real or noise)
+
+RESOURCES
+  - 3Blue1Brown "Essence of Linear Algebra" (YouTube, ~3h)
+  - "Python for Data Analysis" (Wes McKinney) - chapters on NumPy/pandas
+  - Kaggle micro-courses: Python, Pandas (free, short)
+
+BUILD IN THIS PROJECT
+  1. notebooks/01_explore_catalog.ipynb
+     - Load every catalog/*/metadata.json into a pandas DataFrame.
+     - Report: number of products, attribute coverage, image sizes,
+       missing fields, duplicate names.
+  2. notebooks/02_similarity_by_hand.ipynb
+     - Embed 10 product images with the same model the project uses.
+     - Compute cosine similarity matrix with NumPy only.
+     - Run the same query through pgvector and confirm the ranking
+       matches your NumPy result. (Proves you understand what the DB
+       is doing.)
+
+DONE WHEN
+  - You can explain, without notes, why cosine distance on normalized
+    vectors equals 1 - dot product, and your NumPy top-5 matches
+    pgvector's top-5 for 10 sample queries.
+
+---------------------------------------------------------------------
+PHASE 2: EMBEDDINGS, VECTOR SEARCH, EVALUATION   (~60h, ~4 weeks)
+---------------------------------------------------------------------
+WHY
+  This is the core of the project and the most transferable AI skill.
+  Evaluation is the skill most developers skip, and it is what
+  separates engineering from guessing.
+
+LEARN
+  - What an embedding is; how CLIP / SigLIP / DINOv2 are trained
+    (contrastive learning, image-text pairs) at a conceptual level
+  - Model families: CLIP (text+image), DINOv2 (image-only, strong on
+    visual similarity), SigLIP (improved CLIP)
+  - Approximate nearest neighbour (ANN):
+      * exact (brute force) vs ANN
+      * HNSW: parameters m, ef_construction, ef_search
+      * IVFFlat: lists, probes
+      * quantization: halfvec, binary, product quantization
+  - Metrics:
+      * recall@k (did the correct item appear in top k?)
+      * MRR (mean reciprocal rank)
+      * nDCG (graded relevance)
+      * ANN recall vs exact-search recall (index quality)
+      * latency p50/p95/p99, QPS
+
+RESOURCES
+  - Pinecone "Vector Search" learning centre (free articles)
+  - pgvector README + issues (read the HNSW/IVFFlat sections)
+  - "CLIP" paper (Radford et al., 2021) - read abstract + figures
+  - Hugging Face docs: transformers CLIPModel, sentence-transformers
+  - Weaviate / Qdrant blog posts on HNSW and quantization
+
+BUILD IN THIS PROJECT
+  1. Evaluation set  (MOST IMPORTANT TASK OF THE WHOLE PLAN)
+     - Create eval/queries.jsonl with 30-50 entries:
+         {"query_image": "path", "relevant_product_ids": [..]}
+       Include easy cases (same product, other angle), medium cases
+       (same style, other colour) and hard cases (similar-looking but
+       different category).
+     - Write eval/run_eval.py that calls the search function and prints
+       recall@1/5/10, MRR, and p50/p95 latency. Output a JSON file per
+       run into eval/results/ so runs can be compared over time.
+  2. Model comparison
+     - Run the eval with 2-3 embedding models (e.g. CLIP ViT-B/32,
+       SigLIP, DINOv2). Record dimension, latency per image, recall.
+  3. Index tuning
+     - Sweep HNSW ef_search (10, 20, 40, 80, 160) and plot recall vs
+       latency. Compare against exact search to measure ANN recall loss.
+     - Try halfvec and measure memory, recall and latency change.
+  4. Add embedding_model_version and embedding_dim columns so vectors
+     from different models are never mixed.
+
+DONE WHEN
+  - `python eval/run_eval.py` produces a table; you have a documented
+    choice of model + index parameters backed by that table.
+
+---------------------------------------------------------------------
+PHASE 3: HYBRID SEARCH, FILTERING, RERANKING   (~45h, ~3 weeks)
+---------------------------------------------------------------------
+WHY
+  Real product search is never vector-only. This is where your Magento
+  knowledge (attributes, layered navigation) gives you an edge.
+
+LEARN
+  - Hybrid retrieval: vector + keyword (Postgres full-text / BM25)
+  - Score fusion: Reciprocal Rank Fusion (RRF), weighted sum
+  - Filtered ANN pitfalls: post-filtering hurts recall in HNSW;
+    pgvector iterative scans; partitioning by category
+  - Two-stage retrieval: fast recall (top 100) then precise rerank
+  - Cross-encoder / late-interaction rerankers (bge-reranker, ColBERT)
+  - Multi-vector products (several images per product): max-pool,
+    mean-pool, or best-of aggregation
+
+RESOURCES
+  - pgvector docs: filtering + iterative index scans
+  - "Reciprocal Rank Fusion" (Cormack et al.) - short paper
+  - Hugging Face: BAAI/bge-reranker models
+
+BUILD IN THIS PROJECT
+  1. Structured filters on the search endpoint: category, colour,
+     brand, price range. Map them from metadata.json attributes the
+     same way you would map Magento attributes.
+  2. Text + image query ("like this but red"): combine the image
+     embedding and text embedding (weighted average or two-pass).
+  3. Hybrid keyword + vector search over name/description, fused with
+     RRF. Compare to vector-only on the eval set.
+  4. Optional reranker over top 50 candidates. Measure the recall@5
+     gain versus the added latency.
+  5. Group results by product when a product has multiple images.
+
+DONE WHEN
+  - The eval report shows recall@5 for hybrid/reranked search vs the
+    Phase 2 baseline, with latency cost stated next to it.
+
+---------------------------------------------------------------------
+PHASE 4: LLMs, RAG, STRUCTURED OUTPUT   (~60h, ~4 weeks)
+---------------------------------------------------------------------
+WHY
+  LLM features (auto-tagging, natural-language search, assistants) are
+  now a large share of AI engineering job descriptions.
+
+LEARN
+  - Claude API: messages, system prompts, vision input, tool use,
+    structured JSON output, streaming, prompt caching, batch API
+  - Prompt design: role, constraints, examples, output schema
+  - RAG pattern: retrieve -> stuff into context -> generate -> cite
+  - Guardrails: schema validation, retries, refusal handling,
+    prompt-injection awareness (product descriptions are untrusted input)
+  - Cost and latency estimation: tokens in/out x price; caching wins
+  - Evaluating LLM output: golden sets, LLM-as-judge (and its biases),
+    human spot checks
+
+RESOURCES
+  - Anthropic docs + cookbook (docs.claude.com)
+  - "Building effective agents" (Anthropic engineering blog)
+  - DeepLearning.AI short courses on RAG and function calling
+
+BUILD IN THIS PROJECT
+  1. Auto-attribute extraction endpoint
+     - Input: product image. Output (validated JSON): title, colour,
+       material, style, category, short description.
+     - Hook into POST /products and /products/import so new products
+       get suggested metadata (human can override).
+     - Evaluate on the existing catalog: compare generated vs actual
+       metadata.json fields, report field-level accuracy.
+  2. Natural-language search
+     - Query "black leather boots under $100" -> LLM produces
+       {filters: {...}, semantic_query: "..."} via tool use / schema
+       -> execute the Phase 3 hybrid search.
+     - Log LLM tokens, latency and cost per request.
+  3. Guardrails: reject invalid schema, cap tokens, add timeouts and a
+     fallback to plain vector search if the LLM fails.
+
+DONE WHEN
+  - Extraction accuracy per field is measured; NL search has a small
+    eval set of 20 phrasing variants with pass/fail; cost per 1000
+    requests is calculated and documented.
+
+---------------------------------------------------------------------
+PHASE 5: PRODUCTION, SCALE, MLOPS   (~70h, ~4.5 weeks)
+---------------------------------------------------------------------
+WHY
+  Production reliability and cost control are what make an AI
+  engineer valuable to a business. Your backend/Magento background
+  is a real advantage here.
+
+LEARN
+  - Containers: Docker, docker compose; basic Kubernetes concepts
+  - Model serving: ONNX Runtime, TorchServe/Triton, batching,
+    GPU vs CPU trade-offs, quantized models
+  - Async ingestion design: idempotency, retries, dead-letter queues,
+    back-pressure, poison messages
+  - Observability: structured logs, metrics (Prometheus), tracing
+    (OpenTelemetry), dashboards, alerts
+  - Data/model versioning: embedding versions, re-embedding strategy,
+    blue/green index swaps
+  - Scaling vectors: memory maths (dims x 4 bytes x N), halfvec,
+    binary quantization, sharding, disk-based ANN, dedicated vector DBs
+  - Cost: GPU hours per million images, storage, egress
+
+BUILD IN THIS PROJECT
+  1. RabbitMQ worker improvements
+     - Batch images (e.g. 32 per forward pass) instead of one at a time.
+     - Idempotent processing keyed by product id + image hash.
+     - Dead-letter queue + retry with exponential backoff.
+     - Measure throughput (images/sec) before and after batching.
+  2. Metrics
+     - Extend the existing request-correlated logging into metrics:
+       p95 search latency, embed time per image, queue depth, import
+       failure rate. Expose /metrics and chart in Grafana.
+  3. Re-embedding pipeline
+     - Script that builds a new embeddings table/column with a new
+       model version, validates it against the eval set, then swaps
+       search over with a feature flag. Roll back = flip the flag.
+  4. Capacity calculator
+     - Small script: given N images and dims, estimate RAM/disk for
+       raw vectors, HNSW, halfvec, binary. Use it for the "what if we
+       reach 100M / 1B images" question.
+  5. Magento integration
+     - Build a Magento 2 module or webhook that pushes product create/
+       update/delete events to /products/import, and a frontend
+       "search by image" widget calling the search endpoint.
+
+DONE WHEN
+  - Import throughput and search p95 are charted; a model swap can be
+    done and rolled back without downtime.
+
+---------------------------------------------------------------------
+PHASE 6: FINE-TUNING (ONLY IF THE EVAL SHOWS A NEED)   (~80h, ~5 weeks)
+---------------------------------------------------------------------
+WHY
+  Fine-tuning is expensive. Do it only when the eval set proves that
+  off-the-shelf models plateau below your quality target.
+
+LEARN
+  - PyTorch basics: tensors, autograd, Dataset/DataLoader, training loop
+  - Hugging Face Transformers/PEFT: LoRA, adapters
+  - Contrastive learning: InfoNCE, triplet loss, hard-negative mining
+  - Training data: positive pairs (same product, different angle),
+    negatives (similar but different product), augmentation
+  - Overfitting, train/val/test splits, avoiding data leakage between
+    eval queries and training pairs
+  - Experiment tracking: Weights & Biases or MLflow
+  - Cloud GPUs: Colab, RunPod, Lambda, or a rented A10/A100
+
+RESOURCES
+  - Karpathy "Neural Networks: Zero to Hero" (YouTube)
+  - fast.ai "Practical Deep Learning for Coders"
+  - Hugging Face course (NLP + vision chapters)
+  - open_clip repository (training scripts)
+
+BUILD IN THIS PROJECT
+  1. Build a pair dataset from the catalog (multiple images per
+     product = positives; other products in same category = hard
+     negatives). Keep eval queries OUT of the training set.
+  2. Fine-tune a small CLIP/DINOv2 with LoRA. Track loss and eval
+     recall@k each epoch.
+  3. Compare fine-tuned vs base on the eval set. Record GPU hours and
+     cost. Decide whether the gain justifies re-embedding the catalog.
+
+DONE WHEN
+  - You have a written conclusion: "fine-tuning improved recall@5 from
+    X to Y at Z cost" (or "no meaningful gain, keep base model").
+    Either result is a valid, valuable outcome.
+
+---------------------------------------------------------------------
+TIMELINE AT 2-3 HOURS PER DAY (~15 HOURS PER WEEK, 6 DAYS PER WEEK)
+---------------------------------------------------------------------
+Total: ~26 weeks (about 6 months) including buffer and portfolio work.
+
+  Weeks 1-3    PHASE 1  Python, NumPy/pandas, linear algebra   (~40h)
+    Wk 1   Python setup (uv/venv), NumPy, pandas basics
+    Wk 2   3Blue1Brown linear algebra, notebook 01 (explore catalog)
+    Wk 3   Notebook 02 (similarity by hand vs pgvector)  -> exit check
+
+  Weeks 4-7    PHASE 2  Embeddings, vector search, evaluation  (~60h)
+    Wk 4   CLIP/DINOv2 concepts; BUILD EVAL SET (queries.jsonl)
+    Wk 5   run_eval.py (recall@k, MRR, latency); baseline numbers
+    Wk 6   Compare 2-3 embedding models on the eval set
+    Wk 7   HNSW ef_search sweep, halfvec test, model_version column
+
+  Weeks 8-10   PHASE 3  Hybrid search, filters, rerank         (~45h)
+    Wk 8   Structured filters (category/colour/brand/price)
+    Wk 9   Full-text + vector fusion (RRF); text+image queries
+    Wk 10  Reranker, multi-image grouping; compare vs baseline
+
+  Weeks 11-14  PHASE 4  LLMs, RAG, structured output           (~60h)
+    Wk 11  Claude API basics, vision input, structured JSON
+    Wk 12  Auto-attribute extraction endpoint + accuracy eval
+    Wk 13  Natural-language search (LLM -> filters + query)
+    Wk 14  Guardrails, fallbacks, cost/latency measurement
+
+  Weeks 15-19  PHASE 5  Production, scale, MLOps               (~70h)
+    Wk 15  Docker compose polish; batch embedding in RabbitMQ worker
+    Wk 16  Idempotency, retries, dead-letter queue; throughput test
+    Wk 17  Metrics (/metrics, Prometheus, Grafana dashboard)
+    Wk 18  Re-embedding pipeline with feature-flag swap + rollback
+    Wk 19  Magento 2 module/webhook + search-by-image widget
+
+  Weeks 20-24  PHASE 6  Fine-tuning experiment                 (~80h)
+    Wk 20  PyTorch basics (Karpathy videos), Dataset/DataLoader
+    Wk 21  Build pair dataset; leak-proof train/eval split
+    Wk 22  LoRA fine-tune run #1 on a rented GPU; track in W&B
+    Wk 23  Hyper-parameter / hard-negative iteration
+    Wk 24  Compare vs base on eval; cost analysis; decision write-up
+
+  Weeks 25-26  BUFFER + PORTFOLIO
+    Wk 25  README, architecture diagram, results table
+    Wk 26  Blog posts, clean-up, start applying / internal pitch
+
+DAILY ROUTINE (2.5 hours)
+  40 min   Learn: video / doc / paper section (one topic only)
+  80 min   Build: implement it in the project (hands-on, not reading)
+  20 min   Measure: run the eval or benchmark, note the number
+  10 min   Log: one paragraph in docs/experiments.md + next-day task
+
+WEEKLY ROUTINE
+  Mon-Fri  Daily routine above (2-3h after work)
+  Sat      Longer block (3-4h): the week's main milestone / catch-up
+  Sun      Rest. 15-minute weekly review: milestone met? metric moved?
+
+SCHEDULE RULES
+  - If a phase runs over by more than 1 week, cut scope, not quality:
+    skip optional items (marked "Optional") before skipping evaluation.
+  - Never start the next phase without meeting the current "DONE WHEN".
+  - Phase 6 can be shortened to 2 weeks (or skipped) if the eval shows
+    the base model already meets your quality target; use the time for
+    deeper Phase 5 scale work (sharding, quantization, disk ANN).
+  - Fast-track option: at 3h/day and 7 days/week (~21h/week) the plan
+    compresses to about 18-19 weeks.
+  - Slow-week fallback: on days with only 1 hour, do just the
+    Measure + Log steps to keep momentum.
+
+---------------------------------------------------------------------
+PORTFOLIO / CAREER TIPS
+---------------------------------------------------------------------
+  - Publish the repo with a README containing: architecture diagram,
+    eval table (baseline -> hybrid -> rerank -> fine-tuned), latency
+    and cost numbers, and lessons learned.
+  - Write 3-4 short blog posts: "Evaluating visual search with
+    recall@k", "pgvector HNSW tuning", "Batching embeddings behind
+    RabbitMQ", "Magento + visual search integration".
+  - Job titles to target: AI Engineer, Applied ML Engineer, Search
+    Engineer, ML Platform / Backend Engineer (AI). E-commerce search
+    teams especially value Magento/catalog experience.
+  - In interviews, lead with measurable outcomes ("improved recall@5
+    from 0.61 to 0.78 with hybrid + rerank, +40 ms p95"), not tool
+    names.
+
+---------------------------------------------------------------------
+QUICK REFERENCE: MEMORY MATHS FOR SCALING QUESTIONS
+---------------------------------------------------------------------
+  raw vector bytes = dims x bytes_per_value x N
+    float32: 4 bytes   halfvec (float16): 2 bytes   binary: dims/8 bytes
+  Examples (N = 1,000,000,000):
+    512-dim  float32  ~ 2.0 TB      512-dim  halfvec ~ 1.0 TB
+    768-dim  float32  ~ 3.0 TB      512-dim  binary  ~ 64 GB
+  HNSW graph adds roughly 1x-2x on top of raw vectors.
+  Rule of thumb: keep the hot index in RAM; beyond ~100M vectors
+  consider quantization + sharding or a disk-based/distributed engine.
+
+=====================================================================
+END
+=====================================================================

@@ -283,6 +283,70 @@ just logging them) so Magento itself could ask "did SKU X import
 successfully" instead of a human grepping logs. Revisit if the answer
 to "does Magento need to know per-item outcomes" changes.
 
+## Magento connector
+
+`magento/app/code/VisualSearch/Connector/` is a client of this API; it
+adds no server-side code here. Each Magento feature maps onto an
+existing endpoint:
+
+| Magento feature | Endpoint | Why |
+|---|---|---|
+| Manual "Sync to Visual Search" button; on-save sync ("immediate" mode) | `POST /products` | Synchronous, so the outcome (`201` created / `409` exists / `400` bad input) is known immediately and logged |
+| Product-grid mass action; on-save sync ("queue" mode) | `POST /products/import` | Async batches (≤100). Magento publishes to its own DB queue and a consumer sends the batches, so an admin click never waits on CLIP |
+| Storefront "Search by Image" | `POST /search` | Result SKUs are mapped back to Magento products and re-checked against the storefront (enabled, visible, in-store) |
+
+Three places where the API's contract shapes the module:
+
+- **SKU mapping.** The API only accepts lowercase-slug SKUs
+  (`SKU_PATTERN`), Magento SKUs are free-form. The module normalizes
+  deterministically (`Shoe_Red 42` → `shoe-red-42`) and stores the pair
+  in `visual_search_product_map`, because `/search` returns *API* SKUs.
+  Two Magento SKUs that normalize to the same slug collide (the second
+  gets `409`, logged as `skipped`).
+- **`queued` is a terminal status.** `POST /products/import` is
+  fire-and-forget (see [Bulk product import](#bulk-product-import)):
+  Magento can record "accepted, batch `<id>`" but never the per-product
+  outcome, which lives in the worker's logs. The sync-log grid shows the
+  `batch_id` to grep for. This is the "does Magento need per-item
+  outcomes" question that section leaves open; answering yes would mean
+  a status endpoint on this API.
+- **No update/delete.** There is no `PUT`/`DELETE /products/{sku}`, so a
+  re-save of an already-synced product logs `skipped` (`409`) and the
+  index keeps the old image and metadata; deleted Magento products stay
+  in the index (the storefront filter hides them).
+
+Operational note: rate limits are per client IP, and the Magento server
+is the only client the API sees, so *all shoppers share one bucket*
+(`SEARCH_RATE_LIMIT`, default `20/minute`). Raise it (or key the limiter
+on a forwarded client IP) before real traffic. Bulk batches wait out a
+`429` using `Retry-After`, up to twice.
+
+The module was verified against a mock server that reproduces this API's
+route signatures; it has not yet been smoke-tested inside a running
+Magento install (see `magento/README.md`).
+
+## Testing
+
+`backend/tests/` is a pytest unit suite that needs no running
+infrastructure: Postgres, CLIP, RabbitMQ, and the service layer are
+replaced by hand-written fakes (`tests/fakes.py`), so the tests assert
+this app's own logic -- the SQL each query builds (OR for search vs AND
+for list filters, bound parameters, distance → similarity), cleanup of a
+half-written product folder, the queue message format and persistence,
+the worker's swallow-vs-redeliver failure split, request-ID
+correlation, and each route's validation, auth, and rate limiting.
+
+API tests go through the real `app.main.app` (real routers, middleware,
+and limiter with in-memory storage) with fakes placed on `app.state`
+where `lifespan` would put the real services, so wiring and middleware
+order are exercised too. `TestClient` is deliberately not used as a
+context manager, which would run `lifespan` (CLIP load + Postgres).
+
+Not covered by design: `ClipModel`, `db.create_pool`, the worker
+consumer loop, and the training scripts. They need the real model or a
+pgvector Postgres, so they belong in integration tests (a Postgres
+container is the natural next step).
+
 ## Why embeddings are pre-normalized
 
 `ClipModel.encode_image` L2-normalizes every embedding it produces
