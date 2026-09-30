@@ -294,8 +294,10 @@ existing endpoint:
 | Manual "Sync to Visual Search" button; on-save sync ("immediate" mode) | `POST /products` | Synchronous, so the outcome (`201` created / `409` exists / `400` bad input) is known immediately and logged |
 | Product-grid mass action; on-save sync ("queue" mode) | `POST /products/import` | Async batches (≤100). Magento publishes to its own DB queue and a consumer sends the batches, so an admin click never waits on CLIP |
 | Storefront "Search by Image" | `POST /search` | Result SKUs are mapped back to Magento products and re-checked against the storefront (enabled, visible, in-store) |
+| Shopper tracking (view / add to cart / purchase) | `POST /events` | Queued in Magento and forwarded by a consumer, so the API can never slow a page or checkout |
+| "Recommended for you" block | `GET /recommendations` | Loaded by AJAX per visitor -- the host page is full-page-cached and shared, so personal results can't be rendered into it |
 
-Three places where the API's contract shapes the module:
+Places where the API's contract (and Magento's page cache) shape the module:
 
 - **SKU mapping.** The API only accepts lowercase-slug SKUs
   (`SKU_PATTERN`), Magento SKUs are free-form. The module normalizes
@@ -314,6 +316,18 @@ Three places where the API's contract shapes the module:
   re-save of an already-synced product logs `skipped` (`409`) and the
   index keeps the old image and metadata; deleted Magento products stay
   in the index (the storefront filter hides them).
+
+- **Views come from the browser; carts and orders from PHP.** With
+  full-page cache on, a product page is usually served without reaching
+  PHP, so a server-side "product viewed" observer would miss most views.
+  A small JS beacon on the product page posts them instead
+  (`js/track-view.js` -> `visualsearch/event/track`, once per product per
+  session). Add-to-cart and order placement are uncached flows, so plain
+  observers handle them.
+- **Shopper identity.** Logged-in customers are `c<customer id>`; guests get
+  `g<random>` in a first-party `vs_shopper` cookie. A guest who logs in gets
+  a new id, so their guest history doesn't carry over (they see the popular
+  fallback again). Cookie use should be covered by your consent policy.
 
 Operational note: rate limits are per client IP, and the Magento server
 is the only client the API sees, so *all shoppers share one bucket*
@@ -346,6 +360,56 @@ Not covered by design: `ClipModel`, `db.create_pool`, the worker
 consumer loop, and the training scripts. They need the real model or a
 pgvector Postgres, so they belong in integration tests (a Postgres
 container is the natural next step).
+
+## Personalized recommendations
+
+`POST /events` records what a shopper does; `GET /recommendations` turns
+their recent history into product suggestions. It reuses the CLIP
+embeddings already in the `products` table -- there is no model to train.
+
+**Algorithm** (`services/recommendation_service.py`):
+
+1. Load the shopper's newest events (at most `RECOMMEND_MAX_HISTORY`,
+   within `RECOMMEND_WINDOW_DAYS`) that point at *indexed* products.
+2. Give each event a weight: `EVENT_WEIGHTS[type] * 0.5 ** (age / half_life)`
+   -- a purchase (5) outweighs an add-to-cart (3) outweighs a view (1), and
+   an event loses half its pull every `RECOMMEND_HALF_LIFE_DAYS` (14).
+3. Sum `weight * embedding` and L2-normalize: the **taste vector**. Because
+   every embedding is a unit vector in one shared space (see
+   [Why embeddings are pre-normalized](#why-embeddings-are-pre-normalized)),
+   this is the weighted "centre" of what the shopper looks at, and cosine
+   similarity to it is a sensible relevance score.
+4. Ask pgvector for the nearest products (`ORDER BY embedding <=> taste`),
+   excluding anything the shopper **purchased or carted** (plus caller-given
+   `exclude_sku`s). Merely *viewed* products stay eligible.
+
+**Cold start.** A shopper with no usable history gets `strategy: "popular"`:
+products ranked by weighted engagement across *all* shoppers. If no events
+exist anywhere yet, `strategy: "none"` and an empty list. The strategy is
+in the response so a UI can label or hide the block accordingly.
+
+**Design choices worth knowing:**
+
+- *One centroid, not clusters.* A shopper who likes both shoes and bags gets
+  a vector between the two, which can land on neither. Fine for one dominant
+  interest; the natural upgrade is several centroids (cluster the history,
+  query each, interleave) or MMR re-ranking for diversity.
+- *No foreign key* from `shopper_events` to `products`: `build_index`
+  TRUNCATEs `products` on every reindex, and an event may precede its
+  product's indexing. Events for unknown SKUs are stored and ignored until
+  the product exists.
+- *Anonymous ids only.* `shopper_id` is a client-chosen opaque token; the
+  service never sees who anyone is. `DELETE /shoppers/{id}/events` erases a
+  shopper. Events older than the window are ignored but not yet purged --
+  add a retention job before storing real traffic long-term.
+- *Per-IP rate limits are high* (`EVENTS_RATE_LIMIT`, `RECOMMENDATIONS_RATE_LIMIT`)
+  because a storefront sends every shopper's traffic from one IP.
+- *Popularity is unpersonalized and unweighted by recency* -- it is a
+  fallback, not a ranking model.
+
+**Verification.** Besides the unit tests, the SQL was run against a real
+pgvector Postgres (decay ordering, exclusions, cold start, erasure), and
+the Magento client was exercised against the real routes.
 
 ## Why embeddings are pre-normalized
 

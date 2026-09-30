@@ -57,10 +57,12 @@ visual-search-poc/
 │   │   │   ├── embedding_service.py     # bytes/file -> (adapted) embedding
 │   │   │   ├── indexing_service.py      # write path: whole-catalog reindex + single-product add
 │   │   │   ├── product_query_service.py # read path: pgvector search + metadata filter, per request
+│   │   │   ├── recommendation_service.py # shopper events + taste-vector recommendations
 │   │   │   └── attribute_classifier_service.py  # classify an uploaded image's category/color
 │   │   ├── api/
 │   │   │   ├── search.py            # POST /search route
-│   │   │   └── products.py          # GET /products, POST /products, POST /products/import routes
+│   │   │   ├── products.py          # GET /products, POST /products, POST /products/import routes
+│   │   │   └── recommendations.py   # POST /events, GET /recommendations, DELETE /shoppers/{id}/events
 │   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
 │   │   ├── auth.py                  # X-API-Key header check (require_api_key)
 │   │   ├── rate_limit.py            # Redis-backed slowapi Limiter instance
@@ -844,6 +846,49 @@ or any other failure only a worker can detect — **not** in this table,
 because they never reach the HTTP response; see the worker-logs note
 above.
 
+## Personalized recommendations (`/events`, `/recommendations`)
+
+"Recommended for you", based on what a shopper has actually looked at and
+bought. A storefront reports behavior with `POST /events`; the service
+turns one shopper's recent history into a *taste vector* (a weighted,
+time-decayed average of the embeddings of the products they touched) and
+returns the nearest products via pgvector. No training step — it works
+with the same CLIP embeddings as image search.
+
+```bash
+KEY=dev-api-key-change-me
+
+# Report behavior: view | add_to_cart | purchase. `occurred_at` is optional
+# (omit for "now"; set it to backfill past orders). Batches of 1-100.
+curl -X POST http://localhost:8010/events -H "X-API-Key: $KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"events":[
+        {"shopper_id":"c42","sku":"shoe-red","event_type":"purchase"},
+        {"shopper_id":"c42","sku":"shoe-blue","event_type":"view"}]}'
+# -> 201 {"recorded":2}
+
+# Ask for recommendations. Repeat exclude_sku to leave products out
+# (e.g. the product page currently open).
+curl "http://localhost:8010/recommendations?shopper_id=c42&limit=6&exclude_sku=shoe-green" \
+  -H "X-API-Key: $KEY"
+# -> {"strategy":"personalized","results":[{"sku":"shoe-blue","name":"...","price":89.0,"category":"Shoes","score":0.83}, ...]}
+
+# Erase everything recorded for a shopper (privacy request). Idempotent.
+curl -X DELETE http://localhost:8010/shoppers/c42/events -H "X-API-Key: $KEY"
+# -> {"deleted":2}
+```
+
+`strategy` tells you how the list was made: `personalized` (from this
+shopper's history), `popular` (cold start — no usable history yet, so the
+most-engaged-with products overall), or `none` (no events exist at all yet).
+Products the shopper already **purchased or added to a cart** are never
+returned; merely *viewed* ones can be.
+
+`shopper_id` is an opaque token you choose (`c42` for customer 42, a random
+`g…` cookie value for a guest) — never an email or name. Tuning knobs
+(weights, half-life, window, history size) live in `backend/app/config.py`
+and are explained in [`docs/architecture.md`](docs/architecture.md#personalized-recommendations).
+
 ## Magento 2 integration
 
 `magento/app/code/VisualSearch/Connector/` is a Magento 2.4 module that
@@ -1076,6 +1121,7 @@ internals are noise here, not debugging signal — see
 | `sku` already exists (`POST /products`) | 409 | Product '\<sku\>' already exists |
 | Invalid `sku`/`price`/missing field (`POST /products`) | 422 | Pydantic validation error detail |
 | `products`/`files` mismatch, invalid batch JSON, or oversized batch (`POST /products/import`) | 400 | See [Bulk product import](#bulk-product-import-post-productsimport) |
+| Invalid `shopper_id` / event type / SKU / future timestamp, empty or >100-event batch (`POST /events`), bad `limit`/`exclude_sku` (`GET /recommendations`) | 422 | Pydantic validation error detail |
 | Unexpected server error | 500 | Internal error while searching / creating the product |
 
 ## Future improvements

@@ -28,6 +28,8 @@ Stores > Configuration > Services > **Visual Search**
 | Bulk Sync Batch Size | 1-100 products per `POST /products/import` (API cap is 100) |
 | Color Attribute Code | Attribute sent as the product color (default `color`) |
 | Only Match Detected Category / Color | Passes `match_category` / `match_color` to `POST /search` |
+| Track Shopper Events | Report views / add-to-carts / purchases (default on once the module is enabled) |
+| Show "Recommended for you" + Products to Show | Personalized block on the home and product pages (default off) |
 
 ## Features
 
@@ -40,6 +42,25 @@ Stores > Configuration > Services > **Visual Search**
 | Sync status logging | Every attempt is a row in `visual_search_sync_log` |
 | Log history page | Catalog > **Visual Search Sync Log** (filterable by status/type/SKU/date) |
 | Search by image | "Search by Image" header link, plus an upload form on the search results page |
+| Personalized recommendations | "Recommended for you" block on the home page and product pages (`GET /recommendations`), fed by shopper tracking (`POST /events`) |
+
+### Personalized recommendations
+
+1. Enable **Track Shopper Events** first so history builds up, and run the
+   event consumer: `bin/magento queue:consumers:start visualsearch.event.track`
+   (or let cron's `consumers_runner` do it).
+2. Then enable **Show "Recommended for you"**.
+
+What is tracked: product page **views** (JS beacon, because pages are
+full-page-cached), **add to cart**, and **purchases** (order placement).
+The shopper is `c<customer id>` when logged in, or a random id in a
+first-party `vs_shopper` cookie for guests — no personal data is sent.
+The block is filled by AJAX (`visualsearch/recommendation/get`, never
+cached), hides itself when there is nothing to show, and on a product page
+leaves that product out. New shoppers see the store's popular items.
+
+Events are best-effort: if the API is down they are logged and dropped.
+Make sure tracking is covered by your cookie-consent/privacy policy.
 
 ### Bulk sync needs a queue consumer
 
@@ -77,13 +98,23 @@ or rely on Magento cron's `consumers_runner` (default: runs all consumers).
   so *all shoppers share one bucket* (default `/search` 20/min,
   `/products/import` 5/min). Raise `SEARCH_RATE_LIMIT` on the API for real
   traffic. Bulk batches wait out a `429` (`Retry-After`) up to twice.
+- **Recommendations only cover synced products.** The API can only recommend
+  products in its index, so sync your catalog first; unsynced products in a
+  shopper's history are ignored.
+- **A guest who logs in starts fresh** (guest cookie id vs. customer id).
+  Erasing a customer's tracked history means calling
+  `DELETE /shoppers/c<id>/events` on the API — the module does not do this
+  automatically when a customer is deleted.
 - Logs older than the retention setting (default 30 days) are pruned daily by cron.
 
 ## Tested / not tested
 
-Verified: PHP + XML + JSON syntax of every file, and the HTTP client
-(`Model/Api/Client`) against a mock server with the API's exact route
-signatures (201/409/400/401/202 handling, multipart field names, search
-flags, unreachable host). **Not run inside a real Magento install** -- DI
-compilation, the admin grid/button/mass action, queue delivery, and the
-storefront pages still need a smoke test.
+Verified: PHP, XML, JSON and JS syntax of every file. The HTTP client, the
+shopper resolver, the event tracker and the event consumer were run (with
+stubbed Magento classes) against the *real* API routes and a real pgvector
+Postgres: event delivery, cold-start and personalized recommendations,
+repeated `exclude_sku` encoding, error handling, and best-effort behavior
+when the queue or API is down. **Not run inside a real Magento install** —
+DI compilation, the admin grid/button/mass action, queue delivery, the
+observers, and the storefront pages/JS (image search, "Recommended for you",
+the view beacon) still need a smoke test.
