@@ -181,3 +181,65 @@ def test_add_product_cleans_up_and_reraises_unexpected_db_errors(catalog):
         _add(IndexingService(FakeEmbeddingService(), pool), catalog)
 
     assert not (catalog / "shoe-new").exists()
+
+
+# --- update_product ---------------------------------------------------------
+
+
+def _update(service, catalog, **overrides):
+    kwargs = dict(
+        catalog_dir=catalog, sku="shoe-new", name="Renamed", price=70.0, category="Shoes", color=None,
+        image_bytes=None, image_filename=None,
+    )
+    kwargs.update(overrides)
+    return service.update_product(**kwargs)
+
+
+def test_update_product_metadata_only_keeps_photo_and_embedding(catalog):
+    _make_product(catalog, "shoe-new", image=b"original")
+    pool = FakePool(results=[[("catalog/shoe-new/image.png", [0.3, 0.4])]])
+    embedder = FakeEmbeddingService()
+
+    record = _update(IndexingService(embedder, pool), catalog)
+
+    assert embedder.bytes_calls == []
+    _, sql, params = pool.calls[0]
+    assert "UPDATE products" in sql and "embedding" not in sql.split("WHERE")[0]
+    assert params == ("Renamed", 70.0, "Shoes", None, "shoe-new")
+    assert record.embedding == [0.3, 0.4]
+    assert (catalog / "shoe-new" / "image.png").read_bytes() == b"original"
+    assert json.loads((catalog / "shoe-new" / "metadata.json").read_text()) == {
+        "sku": "shoe-new", "name": "Renamed", "price": 70.0, "category": "Shoes",
+    }
+
+
+def test_update_product_with_new_image_reembeds_and_replaces_the_old_file(catalog):
+    _make_product(catalog, "shoe-new", image_name="image.jpg", image=b"old")
+    pool = FakePool(results=[[("catalog/shoe-new/image.png", [0.1, 0.9])]])
+    embedder = FakeEmbeddingService(embedding=[0.1, 0.9])
+
+    _update(IndexingService(embedder, pool), catalog, image_bytes=b"new", image_filename="image.png")
+
+    assert embedder.bytes_calls == [b"new"]
+    assert pool.calls[0][2] == ("Renamed", 70.0, "Shoes", None, "catalog/shoe-new/image.png", [0.1, 0.9], "shoe-new")
+    assert (catalog / "shoe-new" / "image.png").read_bytes() == b"new"
+    assert not (catalog / "shoe-new" / "image.jpg").exists()
+
+
+def test_update_product_unknown_sku_raises_and_writes_nothing(catalog):
+    with pytest.raises(FileNotFoundError):
+        _update(IndexingService(FakeEmbeddingService(), FakePool()), catalog)
+
+    assert not (catalog / "shoe-new").exists()
+
+
+def test_update_product_invalid_image_changes_nothing(catalog):
+    _make_product(catalog, "shoe-new", image=b"original")
+    pool = FakePool()
+    embedder = FakeEmbeddingService(error=ValueError("not a valid image"))
+
+    with pytest.raises(ValueError):
+        _update(IndexingService(embedder, pool), catalog, image_bytes=b"x", image_filename="image.png")
+
+    assert pool.calls == []
+    assert (catalog / "shoe-new" / "image.png").read_bytes() == b"original"

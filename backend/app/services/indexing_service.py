@@ -187,6 +187,97 @@ class IndexingService:
         logger.info("Added new product '%s' via POST /products", sku)
         return record
 
+    def update_product(
+        self,
+        catalog_dir: Path,
+        sku: str,
+        name: str,
+        price: float,
+        category: str,
+        color: str | None,
+        image_bytes: bytes | None = None,
+        image_filename: str | None = None,
+    ) -> ProductRecord:
+        """Replace an existing product's metadata and, optionally, its photo.
+
+        The update is a full replace of the metadata (an omitted `color`
+        clears it), matching what a catalog sync sends. Without
+        `image_bytes` the stored photo and embedding are kept; with it the
+        photo is re-embedded first (so an invalid image fails before
+        anything is changed), the DB row is updated, and only then are
+        `catalog/<sku>/`'s files rewritten.
+
+        Args:
+            catalog_dir: Catalog root (e.g. `app.config.CATALOG_DIR`).
+            sku: Existing product identifier (already validated by the caller).
+            name, price, category, color: The new metadata.
+            image_bytes: New photo bytes, or `None` to keep the current photo.
+            image_filename: Filename for the new photo (one of
+                `SUPPORTED_IMAGE_NAMES`); required with `image_bytes`.
+
+        Returns:
+            The updated `ProductRecord`.
+
+        Raises:
+            FileNotFoundError: If `sku` doesn't exist in the DB.
+            ValueError: If `image_bytes` is not a valid image.
+        """
+        product_dir = catalog_dir / sku
+        new_embedding = self._embedding_service.embed_image_bytes(image_bytes) if image_bytes is not None else None
+        new_image_path = (
+            str((product_dir / image_filename).relative_to(catalog_dir.parent))
+            if image_bytes is not None and image_filename
+            else None
+        )
+
+        with self._db_pool.connection() as conn:
+            if new_embedding is not None:
+                row = conn.execute(
+                    """
+                    UPDATE products SET name = %s, price = %s, category = %s, color = %s,
+                                        image_path = %s, embedding = %s
+                    WHERE sku = %s
+                    RETURNING image_path, embedding
+                    """,
+                    (name, price, category, color, new_image_path, new_embedding, sku),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    UPDATE products SET name = %s, price = %s, category = %s, color = %s
+                    WHERE sku = %s
+                    RETURNING image_path, embedding
+                    """,
+                    (name, price, category, color, sku),
+                ).fetchone()
+        if row is None:
+            raise FileNotFoundError(f"Product '{sku}' does not exist.")
+        image_path, embedding = row
+
+        # Mirror the change into catalog/<sku>/ so a later full `build_index` keeps it.
+        product_dir.mkdir(parents=True, exist_ok=True)
+        if image_bytes is not None and image_filename:
+            for other in SUPPORTED_IMAGE_NAMES:
+                if other != image_filename:
+                    (product_dir / other).unlink(missing_ok=True)
+            (product_dir / image_filename).write_bytes(image_bytes)
+        metadata: dict[str, object] = {"sku": sku, "name": name, "price": price, "category": category}
+        if color:
+            metadata["color"] = color
+        with (product_dir / METADATA_FILENAME).open("w", encoding="utf-8") as file:
+            json.dump(metadata, file, indent=2)
+
+        logger.info("Updated product '%s'", sku)
+        return ProductRecord(
+            sku=sku,
+            name=name,
+            price=price,
+            category=category,
+            color=color,
+            image_path=image_path,
+            embedding=list(embedding),
+        )
+
     def _insert_one(self, record: ProductRecord) -> None:
         """Insert exactly one new row. Raises `FileExistsError` if `sku` already exists."""
         with self._db_pool.connection() as conn:

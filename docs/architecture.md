@@ -291,7 +291,7 @@ existing endpoint:
 
 | Magento feature | Endpoint | Why |
 |---|---|---|
-| Manual "Sync to Visual Search" button; on-save sync ("immediate" mode) | `POST /products` | Synchronous, so the outcome (`201` created / `409` exists / `400` bad input) is known immediately and logged |
+| Manual "Sync to Visual Search" button; on-save sync ("immediate" mode) | `POST /products` | Synchronous, so the outcome (`201` created / `409` exists, followed by `PUT /products/{sku}` / `400` bad input) is known immediately and logged |
 | Product-grid mass action; on-save sync ("queue" mode) | `POST /products/import` | Async batches (≤100). Magento publishes to its own DB queue and a consumer sends the batches, so an admin click never waits on CLIP |
 | Storefront "Search by Image" | `POST /search` | Result SKUs are mapped back to Magento products and re-checked against the storefront (enabled, visible, in-store) |
 | Shopper tracking (view / add to cart / purchase) | `POST /events` | Queued in Magento and forwarded by a consumer, so the API can never slow a page or checkout |
@@ -304,7 +304,7 @@ Places where the API's contract (and Magento's page cache) shape the module:
   deterministically (`Shoe_Red 42` → `shoe-red-42`) and stores the pair
   in `visual_search_product_map`, because `/search` returns *API* SKUs.
   Two Magento SKUs that normalize to the same slug collide (the second
-  gets `409`, logged as `skipped`).
+  overwrites the first via the update path).
 - **`queued` is a terminal status.** `POST /products/import` is
   fire-and-forget (see [Bulk product import](#bulk-product-import)):
   Magento can record "accepted, batch `<id>`" but never the per-product
@@ -312,10 +312,13 @@ Places where the API's contract (and Magento's page cache) shape the module:
   `batch_id` to grep for. This is the "does Magento need per-item
   outcomes" question that section leaves open; answering yes would mean
   a status endpoint on this API.
-- **No update/delete.** There is no `PUT`/`DELETE /products/{sku}`, so a
-  re-save of an already-synced product logs `skipped` (`409`) and the
-  index keeps the old image and metadata; deleted Magento products stay
-  in the index (the storefront filter hides them).
+- **Update, but no delete.** `PUT /products/{sku}` replaces a product's
+  metadata and (optionally) its photo. `SyncService::syncNow` tries
+  `POST /products` first and, on `409`, follows up with the `PUT`, so a
+  re-save of an already-synced product refreshes the index (logged
+  `success`). The bulk worker (`app/jobs.py`) does the same when
+  `add_product` raises `FileExistsError`. There is no `DELETE`: deleted
+  Magento products stay in the index (the storefront filter hides them).
 
 - **Views come from the browser; carts and orders from PHP.** With
   full-page cache on, a product page is usually served without reaching
@@ -449,7 +452,7 @@ loaded.
 | Infra | `app/queue.py` | **Bulk-import producer**, imported only by `api/products.py`. `enqueue_import_job` opens a short-lived `pika` connection to RabbitMQ (a broker deliberately separate from the rate-limiting Redis) and publishes one durable, persistent JSON message per product -- the API process never imports `app.jobs`/`IndexingService`/`ClipModel` for this feature. |
 | Infra | `app/jobs.py` | **Bulk-import consumer**, imported only by `scripts/run_worker.py` (never the API process). `init_services()` loads CLIP + opens a DB pool once, eagerly, for the worker's whole lifetime. `handle_message` decodes one RabbitMQ message body; `import_product_job` calls `IndexingService.add_product`, catching/logging *permanent* failures (`FileExistsError`/`ValueError`, no point redelivering) but re-raising anything unexpected so the message stays unacked and RabbitMQ redelivers it. |
 | API | `app/api/search.py` | HTTP concerns only: validates the upload, calls services, maps errors to HTTP status codes. Router-level auth + a `SEARCH_RATE_LIMIT` limit (CLIP inference is the expensive part). |
-| API | `app/api/products.py` | HTTP concerns only. `GET /products`: plain metadata filtering, `PRODUCTS_RATE_LIMIT`. `POST /products`: validates the upload + form fields (`SKU_PATTERN`, content type), calls `IndexingService.add_product` synchronously, maps `FileExistsError`/`ValueError` to 409/400, `CREATE_PRODUCT_RATE_LIMIT`. `POST /products/import`: validates a whole batch's *shape* synchronously (JSON, counts, per-item fields, file types), then calls `app.queue.enqueue_import_job` per item and returns `202` without waiting, `BULK_IMPORT_RATE_LIMIT`. All three share router-level auth. |
+| API | `app/api/products.py` | HTTP concerns only. `GET /products`: plain metadata filtering, `PRODUCTS_RATE_LIMIT`. `POST /products`: validates the upload + form fields (`SKU_PATTERN`, content type), calls `IndexingService.add_product` synchronously, maps `FileExistsError`/`ValueError` to 409/400, `CREATE_PRODUCT_RATE_LIMIT`. `PUT /products/{sku}`: updates metadata and optionally the photo via `IndexingService.update_product`, maps `FileNotFoundError`/`ValueError` to 404/400. `POST /products/import`: validates a whole batch's *shape* synchronously (JSON, counts, per-item fields, file types), then calls `app.queue.enqueue_import_job` per item and returns `202` without waiting, `BULK_IMPORT_RATE_LIMIT`. All four share router-level auth. |
 | Entrypoint | `app/main.py` | Configures logging first, then wires everything together once at startup (`lifespan`): opens the DB pool, loads the ML models, registers the rate-limit and request-logging middleware, exposes the FastAPI `app`. Does *not* load the catalog -- there's nothing to load, every request queries Postgres. Never imports `app.jobs` (see `app/queue.py`'s row above). |
 | Script | `scripts/build_embeddings.py` | CLI entrypoint for the offline indexing flow (flow 2). |
 | Script | `scripts/run_worker.py` | CLI entrypoint for the `worker` service (flow 6's consumer). Calls `app.jobs.init_services()` once, then consumes from RabbitMQ one message at a time (`prefetch_count=1`), acking only after a successful import -- see [Bulk product import](#bulk-product-import) for why. |

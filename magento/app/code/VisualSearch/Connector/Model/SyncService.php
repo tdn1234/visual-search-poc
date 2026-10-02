@@ -21,6 +21,7 @@ use VisualSearch\Connector\Model\Source\SyncType;
  * Orchestrates every product sync and writes the sync log.
  *
  *  - {@see syncNow()}: one product, synchronously, via POST /products
+ *    (or PUT /products/{sku} when the API answers 409 "already exists")
  *    (manual button, and on-save in "immediate" mode).
  *  - {@see enqueue()} + {@see processQueued()}: many products through the
  *    Magento queue, sent to the API in batches via POST /products/import
@@ -74,6 +75,13 @@ class SyncService
             $response = $this->client->createProduct($payload);
             $httpStatus = $response->getStatusCode();
             [$status, $message] = $this->interpretCreateResponse($response);
+
+            // Already indexed: push the Magento product's current data as an update.
+            if ($response->getStatusCode() === 409) {
+                $response = $this->client->updateProduct($payload);
+                $httpStatus = $response->getStatusCode();
+                [$status, $message] = $this->interpretUpdateResponse($response);
+            }
 
             if ($status === Status::SUCCESS || $status === Status::SKIPPED) {
                 $this->productMap->upsert($productId, $apiSku);
@@ -254,8 +262,18 @@ class SyncService
     {
         return match ($response->getStatusCode()) {
             201 => [Status::SUCCESS, 'Product created in the visual search index.'],
-            409 => [Status::SKIPPED, 'Already in the visual search index. The API has no update endpoint, '
-                . 'so the existing entry was kept.'],
+            409 => [Status::SKIPPED, 'Already in the visual search index.'],
+            default => [Status::FAILED, $this->describeFailure($response)],
+        };
+    }
+
+    /**
+     * @return array{0: string, 1: string} [status, message]
+     */
+    private function interpretUpdateResponse(Response $response): array
+    {
+        return match ($response->getStatusCode()) {
+            200 => [Status::SUCCESS, 'Already in the visual search index; metadata and image updated.'],
             default => [Status::FAILED, $this->describeFailure($response)],
         };
     }
@@ -265,6 +283,10 @@ class SyncService
         return match ($response->getStatusCode()) {
             401 => 'Visual search API rejected the API key (401). Check Stores > Configuration > Services > Visual Search.',
             429 => 'Visual search API rate limit exceeded (429). Try again in a minute.',
+            301, 302, 303, 307, 308 => 'Visual search API URL redirected the request (HTTP '
+                . $response->getStatusCode() . '). Use the final URL (e.g. https, no trailing-slash redirect) '
+                . 'in Stores > Configuration > Services > Visual Search.',
+            200 => 'Unexpected HTTP 200 (expected 201): the API URL probably points at the wrong service or path.',
             default => sprintf('API error %d: %s', $response->getStatusCode(), $response->getErrorMessage()),
         };
     }

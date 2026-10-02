@@ -176,6 +176,23 @@ class FakeIndexingService:
     def __init__(self) -> None:
         self.error: Exception | None = None
         self.calls: list[dict] = []
+        self.update_calls: list[dict] = []
+
+    def update_product(self, **kwargs):
+        self.update_calls.append(kwargs)
+        if self.error:
+            raise self.error
+        from app.schemas.search import ProductRecord
+
+        return ProductRecord(
+            sku=kwargs["sku"],
+            name=kwargs["name"],
+            price=kwargs["price"],
+            category=kwargs["category"],
+            color=kwargs["color"],
+            image_path=f"catalog/{kwargs['sku']}/image.png",
+            embedding=[0.1, 0.2],
+        )
 
     def add_product(self, **kwargs):
         self.calls.append(kwargs)

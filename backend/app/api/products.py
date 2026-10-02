@@ -30,7 +30,7 @@ import json
 import logging
 import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Path, Query, Request, UploadFile, status
 from pydantic import ValidationError
 
 from app.auth import require_api_key
@@ -181,6 +181,67 @@ async def create_product(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal error while creating the product.",
+        ) from exc
+
+    return ProductSummary(
+        sku=record.sku, name=record.name, price=record.price, category=record.category, color=record.color
+    )
+
+
+@router.put("/products/{sku}", response_model=ProductSummary)
+@limiter.limit(CREATE_PRODUCT_RATE_LIMIT)
+async def update_product(
+    request: Request,
+    sku: str = Path(..., pattern=SKU_PATTERN, description="SKU of the existing product."),
+    name: str = Form(..., max_length=NAME_MAX_LENGTH, pattern=TEXT_PATTERN, description="Human-readable product name."),
+    price: float = Form(..., gt=0, le=MAX_PRICE, allow_inf_nan=False, description="Product price."),
+    category: str = Form(..., max_length=CATEGORY_MAX_LENGTH, pattern=TEXT_PATTERN, description="Product category."),
+    color: str | None = Form(
+        None, max_length=COLOR_MAX_LENGTH, pattern=TEXT_PATTERN, description="Dominant color. Omit to clear it."
+    ),
+    file: UploadFile | None = File(None, description="New product photo (JPEG or PNG). Omit to keep the current one."),
+) -> ProductSummary:
+    """Update an existing product's metadata and, optionally, its photo.
+
+    Metadata is replaced as a whole (an omitted `color` clears it). When
+    `file` is sent the photo is re-embedded; otherwise the stored photo and
+    embedding are kept.
+
+    Raises:
+        HTTPException 400: If `file` is empty/unsupported/not a valid image.
+        HTTPException 401: If the request is missing a valid `X-API-Key` header.
+        HTTPException 404: If no product has this `sku`.
+        HTTPException 413: If the uploaded file exceeds `MAX_UPLOAD_BYTES`.
+        HTTPException 422: If a field is invalid.
+        HTTPException 429: If the caller has exceeded `CREATE_PRODUCT_RATE_LIMIT`.
+        HTTPException 500: For any unexpected server-side failure.
+    """
+    image = None
+    if file is not None and file.filename:
+        image = await read_validated_image(file, _ALLOWED_CONTENT_TYPES)
+
+    indexing_service = request.app.state.indexing_service
+
+    try:
+        record = indexing_service.update_product(
+            catalog_dir=CATALOG_DIR,
+            sku=sku,
+            name=name,
+            price=price,
+            category=category,
+            color=color,
+            image_bytes=image.data if image else None,
+            image_filename=_CONTENT_TYPE_TO_FILENAME[image.content_type] if image else None,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - last-resort safety net for the API layer
+        logger.exception("Unexpected error while updating product '%s'", sku)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal error while updating the product.",
         ) from exc
 
     return ProductSummary(

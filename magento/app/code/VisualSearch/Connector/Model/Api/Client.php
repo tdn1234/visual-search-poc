@@ -41,6 +41,23 @@ class Client
     }
 
     /**
+     * PUT /products/{sku} -- replaces an existing product's metadata and photo.
+     * 200 = updated, 404 = sku not in the index.
+     *
+     * @param array<string, mixed> $payload
+     * @throws ApiException
+     */
+    public function updateProduct(array $payload): Response
+    {
+        $meta = $payload['meta'];
+        unset($meta['sku']);
+        return $this->request('PUT', '/products/' . rawurlencode($payload['meta']['sku']), ['multipart' => array_merge(
+            $this->metaFields($meta),
+            [$this->filePart('file', $payload)]
+        )]);
+    }
+
+    /**
      * POST /products/import -- asynchronous; 202 + batch_id, the service's
      * worker embeds each product later. `products[i]` pairs with `files[i]`.
      *
@@ -140,6 +157,8 @@ class Client
             'timeout' => $this->config->getTimeout(),
             'connect_timeout' => 5,
             'http_errors' => false,
+            // A followed redirect turns the POST into a GET (a bogus 200); surface it instead.
+            'allow_redirects' => false,
             'headers' => ['X-API-Key' => $this->config->getApiKey(), 'Accept' => 'application/json'],
         ]]);
 

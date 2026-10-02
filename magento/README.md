@@ -79,19 +79,21 @@ or rely on Magento cron's `consumers_runner` (default: runs all consumers).
 |---|---|
 | `pending` | Waiting in the Magento queue |
 | `queued` | Accepted by the API's async import (`202`). **Final** state for bulk: the API has no status endpoint, so per-product results are only in the service's worker log (grep the `batch_id` shown in the grid) |
-| `success` | Created in the index (`201`, single sync) |
-| `skipped` | Already in the index (`409`) |
+| `success` | Created (`201`) or, if it was already indexed, updated (`200`) — single sync |
+| `skipped` | Already in the index (`409`) — no longer produced by single sync, which now updates instead |
 | `failed` | Product couldn't be built (no price / no JPEG-PNG image), API error, or API unreachable -- see Message |
 
 ## Things to know
 
-- **The API has no update or delete endpoint.** Re-saving an already-synced
-  product logs `skipped` (409) and the index keeps the old image/metadata.
-  Products deleted in Magento stay in the index; storefront results are
+- **Re-saving an already-synced product updates it.** The single sync tries
+  `POST /products`; on `409` it sends `PUT /products/{sku}` with the current
+  name, price, category, color and image (log: `success`, "metadata and image
+  updated"). Bulk imports are updated by the API's worker the same way (see
+  its log). The API has no delete endpoint: products deleted in Magento stay in the index; storefront results are
   re-checked against Magento, so they're simply not shown.
 - **SKUs are normalized** to the API's slug format (`Shoe_Red 42` ->
   `shoe-red-42`). Two SKUs that normalize to the same slug collide (the second
-  is `skipped`). `visual_search_product_map` maps API SKUs back to products.
+  is treated as an update of the first). `visual_search_product_map` maps API SKUs back to products.
 - **Only JPEG/PNG base images** are accepted by the API; products with a
   WEBP/GIF base image fail with a clear message.
 - **Rate limits are per client IP.** Magento is the only client the API sees,

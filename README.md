@@ -728,6 +728,36 @@ insert fails), `IndexingService.add_product` removes that folder again
 before returning the error — a failed request never leaves a
 half-written product on disk.
 
+## Updating a product (`PUT /products/{sku}`)
+
+Replaces an existing product's metadata and, optionally, its photo.
+Multipart form fields: `name`, `price`, `category` (required), `color`
+(optional — omitting it **clears** the color; the update is a full replace of
+the metadata) and `file` (optional JPEG/PNG — omit it to keep the current
+photo and embedding). Validation and rate limit match `POST /products`.
+
+```bash
+curl -X PUT http://localhost:8000/products/shoe-purple \
+  -H "X-API-Key: $API_KEY" \
+  -F name="Purple Shoe v2" -F price=89.9 -F category=Shoes -F color=violet \
+  -F file=@new-photo.jpg
+```
+
+| Situation | HTTP status |
+|---|---|
+| Updated (returns the product summary) | 200 |
+| No product with this `sku` | 404 |
+| Invalid field, or bad/unsupported image | 422 / 400 |
+| Missing/invalid `X-API-Key`, rate limit exceeded | 401 / 429 |
+
+A new photo is embedded *before* anything is changed, so an invalid image
+leaves the product untouched. The DB row is updated first, then
+`catalog/<sku>/` is rewritten so a later full reindex keeps the change.
+There is still no `DELETE`.
+
+The bulk import worker uses this too: an item whose `sku` already exists is
+**updated** rather than skipped.
+
 ## Bulk product import (`POST /products/import`)
 
 For importing many products at once (e.g. a Magento catalog export) —
@@ -785,8 +815,9 @@ docker-compose logs worker | grep 8c2f11be4d7a
 2026-09-29 ... [import-8c2f11be4d7a-1] app.jobs: Imported product 'hat-orange' (batch '8c2f11be4d7a', item 1)
 ```
 
-(a skipped duplicate logs a `WARNING` in the same place instead, e.g.
-`Skipped product 'bag-purple' ... already exists`.)
+(a duplicate `sku` is applied as an update and logs `Updated existing product
+'bag-purple' ...` instead; an update that fails permanently, e.g. a corrupt
+image, logs a `Skipped product ...` `WARNING`.)
 
 **But it's *not* fire-and-forget about durability.** Each message is
 published to a durable RabbitMQ queue and only acknowledged (removed
@@ -900,7 +931,7 @@ through a Magento queue (→ `POST /products/import`), a sync-log admin
 grid, and search by image on the storefront (→ `POST /search`).
 
 Setup, config, the queue consumer, log statuses, and known limits (no
-update/delete endpoint yet, per-IP rate limits shared by all shoppers)
+delete endpoint yet, per-IP rate limits shared by all shoppers)
 are in [`magento/README.md`](magento/README.md); the design is in
 [`docs/architecture.md`](docs/architecture.md#magento-connector).
 
@@ -1141,6 +1172,7 @@ internals are noise here, not debugging signal — see
 | Corrupted/unreadable image | 400 | Could not encode image with CLIP |
 | `products` table missing or empty (`/search`) | 503 | Catalog not indexed yet — run the build script |
 | `sku` already exists (`POST /products`) | 409 | Product '\<sku\>' already exists |
+| `sku` not found (`PUT /products/{sku}`) | 404 | Product '\<sku\>' does not exist. |
 | Invalid `sku`/`price`/missing field (`POST /products`) | 422 | Pydantic validation error detail |
 | `products`/`files` mismatch, invalid batch JSON, or oversized batch (`POST /products/import`) | 400 | See [Bulk product import](#bulk-product-import-post-productsimport) |
 | Invalid `shopper_id` / event type / SKU / future timestamp, empty or >100-event batch (`POST /events`), bad `limit`/`exclude_sku` (`GET /recommendations`) | 422 | Pydantic validation error detail |

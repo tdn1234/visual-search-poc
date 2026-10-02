@@ -27,16 +27,25 @@ class RecordingIndexing:
         self.calls: list[dict] = []
         self.request_id_during_call: str | None = None
 
+    update_error: Exception | None = None
+    update_calls: list = []
+
     def add_product(self, **kwargs):
         self.calls.append(kwargs)
         self.request_id_during_call = request_id_var.get()
         if self.error:
             raise self.error
 
+    def update_product(self, **kwargs):
+        self.update_calls.append(kwargs)
+        if self.update_error:
+            raise self.update_error
+
 
 @pytest.fixture
 def indexing(monkeypatch):
     fake = RecordingIndexing()
+    fake.update_calls = []
     monkeypatch.setattr(jobs, "_indexing_service", fake)
     return fake
 
@@ -64,7 +73,27 @@ def test_job_tags_logs_with_batch_and_item_then_restores_the_request_id(indexing
     assert request_id_var.get() == ""
 
 
-@pytest.mark.parametrize("permanent_error", [FileExistsError("already exists"), ValueError("bad image")])
+def test_existing_sku_is_updated_instead_of_skipped(indexing):
+    indexing.error = FileExistsError("already exists")
+
+    jobs.import_product_job(**JOB)
+
+    (call,) = indexing.update_calls
+    assert call["sku"] == "bag-x"
+    assert call["image_bytes"] == b"\x89PNG-bytes"
+
+
+def test_existing_sku_whose_update_fails_permanently_is_skipped(indexing, caplog):
+    indexing.error = FileExistsError("already exists")
+    indexing.update_error = ValueError("bad image")
+
+    with caplog.at_level("WARNING"):
+        jobs.import_product_job(**JOB)  # must not raise
+
+    assert "Skipped product 'bag-x'" in caplog.text
+
+
+@pytest.mark.parametrize("permanent_error", [ValueError("bad image")])
 def test_permanent_failures_are_swallowed_so_the_message_is_acked(indexing, permanent_error, caplog):
     """A duplicate sku / corrupt image fails identically on every retry -- redelivering would loop forever."""
     indexing.error = permanent_error

@@ -136,6 +136,62 @@ def test_create_product_unexpected_failure_is_500_without_leaking_internals(
     assert "hunter2" not in response.text
 
 
+# --- PUT /products/{sku} ----------------------------------------------------
+
+UPDATE_FORM = {"name": "Purple Shoe v2", "price": "89.9", "category": "Shoes", "color": "violet"}
+
+
+def test_update_product_without_a_file_keeps_the_photo(client, auth_headers, services):
+    response = client.put("/products/shoe-purple", headers=auth_headers, data=UPDATE_FORM)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "sku": "shoe-purple", "name": "Purple Shoe v2", "price": 89.9, "category": "Shoes", "color": "violet",
+    }
+    (call,) = services.indexing.update_calls
+    assert call["sku"] == "shoe-purple"
+    assert call["image_bytes"] is None
+    assert call["image_filename"] is None
+
+
+def test_update_product_with_a_file_passes_the_new_image(client, auth_headers, services, png_bytes):
+    response = client.put(
+        "/products/shoe-purple", headers=auth_headers, data=UPDATE_FORM, files={"file": ("p", png_bytes, "image/png")}
+    )
+
+    assert response.status_code == 200
+    (call,) = services.indexing.update_calls
+    assert call["image_bytes"] == png_bytes
+    assert call["image_filename"] == "image.png"
+
+
+def test_update_unknown_product_is_404(client, auth_headers, services):
+    services.indexing.error = FileNotFoundError("Product 'shoe-purple' does not exist.")
+
+    response = client.put("/products/shoe-purple", headers=auth_headers, data=UPDATE_FORM)
+
+    assert response.status_code == 404
+
+
+def test_update_product_invalid_image_is_400(client, auth_headers, services, png_bytes):
+    response = client.put(
+        "/products/shoe-purple", headers=auth_headers, data=UPDATE_FORM, files={"file": ("p", b"nope", "image/png")}
+    )
+
+    assert response.status_code == 400
+    assert services.indexing.update_calls == []
+
+
+def test_update_product_validates_fields_and_sku(client, auth_headers, services):
+    assert client.put("/products/shoe-purple", headers=auth_headers, data={**UPDATE_FORM, "price": "-1"}).status_code == 422
+    assert client.put("/products/Bad_SKU", headers=auth_headers, data=UPDATE_FORM).status_code == 422
+    assert services.indexing.update_calls == []
+
+
+def test_update_product_requires_api_key(client):
+    assert client.put("/products/shoe-purple", data=UPDATE_FORM).status_code == 401
+
+
 # --- POST /products/import --------------------------------------------------
 
 

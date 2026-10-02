@@ -149,8 +149,22 @@ def import_product_job(
             image_filename=image_filename,
         )
         logger.info("Imported product '%s' (batch '%s', item %d)", sku, batch_id, item_index)
-    except FileExistsError as exc:
-        logger.warning("Skipped product '%s' (batch '%s', item %d): %s", sku, batch_id, item_index, exc)
+    except FileExistsError:
+        # Already indexed: a re-import is an update, so apply it instead of dropping it.
+        try:
+            _indexing_service.update_product(
+                catalog_dir=CATALOG_DIR,
+                sku=sku,
+                name=name,
+                price=price,
+                category=category,
+                color=color,
+                image_bytes=image_bytes,
+                image_filename=image_filename,
+            )
+            logger.info("Updated existing product '%s' (batch '%s', item %d)", sku, batch_id, item_index)
+        except (FileNotFoundError, ValueError) as exc:
+            logger.warning("Skipped product '%s' (batch '%s', item %d): %s", sku, batch_id, item_index, exc)
     except ValueError as exc:
         logger.warning(
             "Skipped product '%s' (batch '%s', item %d): invalid image: %s", sku, batch_id, item_index, exc
