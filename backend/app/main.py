@@ -26,10 +26,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from app.api.products import router as products_router
 from app.api.recommendations import router as recommendations_router
 from app.api.search import router as search_router
-from app.config import API_KEY, CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE
+from app.config import API_KEY, CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE, MAX_REQUEST_BODY_BYTES
 from app.db import create_pool
 from app.logging_config import configure_logging
-from app.middleware import RequestContextMiddleware
+from app.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
 from app.models.category_classifier import load_category_classifier
 from app.models.clip_model import ClipModel
 from app.models.color_adapter import load_color_adapter
@@ -101,6 +101,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
 # Added last so it becomes the *outermost* middleware (Starlette wraps in
 # reverse registration order): the request ID must be assigned before
 # rate limiting runs, and the access-log line must see the real final

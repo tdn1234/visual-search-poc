@@ -133,6 +133,32 @@ SHOPPER_ID_PATTERN: str = r"^[A-Za-z0-9_-]{1,64}$"
 EVENTS_RATE_LIMIT: str = os.environ.get("EVENTS_RATE_LIMIT", "600/minute")
 RECOMMENDATIONS_RATE_LIMIT: str = os.environ.get("RECOMMENDATIONS_RATE_LIMIT", "300/minute")
 
+# --- Input validation ---------------------------------------------------------
+# Image uploads (POST /search, /products, /products/import). The content
+# type a client declares is untrusted, so app/validation.py also sniffs
+# the real format from the bytes and enforces these size limits *before*
+# any decoding/CLIP work happens.
+MAX_UPLOAD_BYTES: int = int(os.environ.get("MAX_UPLOAD_BYTES", str(10 * 1024 * 1024)))
+
+# Decoded size cap (width x height). A tiny file can expand to gigabytes
+# of pixels ("decompression bomb"); 25 MP is ~5000x5000, far above what
+# CLIP (which resizes to 224x224) needs.
+MAX_IMAGE_PIXELS: int = int(os.environ.get("MAX_IMAGE_PIXELS", "25000000"))
+
+# Whole-request cap for POST /products/import (many files at once). Also
+# enforced up front, from Content-Length, by app.middleware.BodySizeLimitMiddleware.
+MAX_BULK_IMPORT_TOTAL_BYTES: int = int(os.environ.get("MAX_BULK_IMPORT_TOTAL_BYTES", str(100 * 1024 * 1024)))
+MAX_REQUEST_BODY_BYTES: int = MAX_BULK_IMPORT_TOTAL_BYTES + 1024 * 1024  # + multipart/form overhead
+
+# Free-text product metadata: bounded length, first char non-whitespace,
+# no control characters (newlines, NULs, ...) -- these end up in
+# metadata.json, SQL rows and log lines.
+NAME_MAX_LENGTH: int = 200
+CATEGORY_MAX_LENGTH: int = 100
+COLOR_MAX_LENGTH: int = 50
+TEXT_PATTERN: str = r"^\S[^\x00-\x1f\x7f]*$"
+MAX_PRICE: float = 1_000_000.0
+
 # --- Search configuration ---------------------------------------------------
 TOP_K_RESULTS: int = 5
 

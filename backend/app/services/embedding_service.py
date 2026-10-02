@@ -59,7 +59,7 @@ class EmbeddingService:
         try:
             image = Image.open(io.BytesIO(image_bytes))
             image.load()
-        except UnidentifiedImageError as exc:
+        except (UnidentifiedImageError, OSError) as exc:
             raise ValueError(
                 "Uploaded file is not a valid image (jpg/png/webp)."
             ) from exc

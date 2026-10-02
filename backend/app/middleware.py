@@ -18,7 +18,7 @@ import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
 from app.logging_config import request_id_var
 
@@ -63,3 +63,26 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         response.headers["X-Request-ID"] = request_id
         request_id_var.reset(token)
         return response
+
+
+class BodySizeLimitMiddleware:
+    """Reject requests whose declared `Content-Length` exceeds `max_bytes` with a 413.
+
+    Runs before the multipart parser buffers anything, so an oversized
+    upload is refused without being spooled. It only sees the header:
+    chunked bodies without one are still bounded per file by
+    `app.validation.read_validated_image`.
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http":
+            declared = dict(scope["headers"]).get(b"content-length", b"")
+            if declared.isdigit() and int(declared) > self.max_bytes:
+                response = JSONResponse({"detail": f"Request body too large (max {self.max_bytes} bytes)."}, status_code=413)
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)

@@ -164,10 +164,12 @@ def _png_files(png_bytes, count):
     return [("files", (f"f{i}.png", png_bytes, "image/png")) for i in range(count)]
 
 
-def test_bulk_import_queues_one_job_per_product_in_order_and_returns_202(client, auth_headers, enqueued, png_bytes):
+def test_bulk_import_queues_one_job_per_product_in_order_and_returns_202(
+    client, auth_headers, enqueued, png_bytes, jpeg_bytes
+):
     files = [
         ("files", ("a.png", png_bytes, "image/png")),
-        ("files", ("b.jpg", b"jpeg-bytes", "image/jpeg")),
+        ("files", ("b.jpg", jpeg_bytes, "image/jpeg")),
     ]
 
     response = _import(client, auth_headers, [_item("bag-a"), _item("bag-b", color=None)], files)
@@ -182,7 +184,7 @@ def test_bulk_import_queues_one_job_per_product_in_order_and_returns_202(client,
         (1, "bag-b", "image.jpg"),
     ]
     assert enqueued[0]["image_bytes"] == png_bytes  # products[i] is paired with files[i]
-    assert enqueued[1]["image_bytes"] == b"jpeg-bytes"
+    assert enqueued[1]["image_bytes"] == jpeg_bytes
     assert enqueued[1]["color"] is None
     assert {j["batch_id"] for j in enqueued} == {body["batch_id"]}  # one shared id for log correlation
 

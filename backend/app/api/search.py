@@ -27,6 +27,7 @@ from app.auth import require_api_key
 from app.config import SEARCH_RATE_LIMIT, TOP_K_RESULTS
 from app.rate_limit import limiter
 from app.schemas.search import SearchResponse
+from app.validation import read_validated_image
 
 logger = logging.getLogger(__name__)
 
@@ -83,20 +84,14 @@ async def search_by_image(
         HTTPException 429: If the caller has exceeded `SEARCH_RATE_LIMIT`
             (see `app.config`/`app.rate_limit`).
         HTTPException 400: If the uploaded file is missing/empty/not
-            a supported image type.
+            a supported image type, or its contents don't match its
+            declared type / are corrupt / have too many pixels.
+        HTTPException 413: If the uploaded file exceeds `MAX_UPLOAD_BYTES`.
         HTTPException 503: If the product catalog has not been
             indexed yet (the Postgres `products` table is empty).
         HTTPException 500: For any unexpected server-side failure.
     """
-    if file.content_type not in ALLOWED_CONTENT_TYPES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type '{file.content_type}'. Use JPEG, PNG, or WEBP.",
-        )
-
-    image_bytes = await file.read()
-    if not image_bytes:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+    image_bytes = (await read_validated_image(file, ALLOWED_CONTENT_TYPES)).data
 
     embedding_service = request.app.state.embedding_service
     product_query_service = request.app.state.product_query_service

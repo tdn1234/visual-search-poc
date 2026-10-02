@@ -8,7 +8,14 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
-from app.config import SKU_PATTERN
+from app.config import (
+    CATEGORY_MAX_LENGTH,
+    COLOR_MAX_LENGTH,
+    MAX_PRICE,
+    NAME_MAX_LENGTH,
+    SKU_PATTERN,
+    TEXT_PATTERN,
+)
 
 
 class ProductRecord(BaseModel):
@@ -68,10 +75,12 @@ class BulkProductItem(BaseModel):
     """
 
     sku: str = Field(..., pattern=SKU_PATTERN, description="Unique product identifier, e.g. 'shoe-purple'.")
-    name: str = Field(..., description="Human-readable product name.")
-    price: float = Field(..., gt=0, description="Product price.")
-    category: str = Field(..., description="Product category, e.g. 'Shoes'.")
-    color: str | None = Field(None, description="Dominant product color, e.g. 'purple'. Optional.")
+    name: str = Field(..., max_length=NAME_MAX_LENGTH, pattern=TEXT_PATTERN, description="Human-readable product name.")
+    price: float = Field(..., gt=0, le=MAX_PRICE, allow_inf_nan=False, description="Product price.")
+    category: str = Field(..., max_length=CATEGORY_MAX_LENGTH, pattern=TEXT_PATTERN, description="Product category, e.g. 'Shoes'.")
+    color: str | None = Field(
+        None, max_length=COLOR_MAX_LENGTH, pattern=TEXT_PATTERN, description="Dominant product color, e.g. 'purple'. Optional."
+    )
 
 
 class BulkImportResponse(BaseModel):

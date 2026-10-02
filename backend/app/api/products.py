@@ -37,14 +37,21 @@ from app.auth import require_api_key
 from app.config import (
     BULK_IMPORT_RATE_LIMIT,
     CATALOG_DIR,
+    CATEGORY_MAX_LENGTH,
+    COLOR_MAX_LENGTH,
     CREATE_PRODUCT_RATE_LIMIT,
     MAX_BULK_IMPORT_ITEMS,
+    MAX_BULK_IMPORT_TOTAL_BYTES,
+    MAX_PRICE,
+    NAME_MAX_LENGTH,
     PRODUCTS_RATE_LIMIT,
     SKU_PATTERN,
+    TEXT_PATTERN,
 )
 from app.queue import enqueue_import_job
 from app.rate_limit import limiter
 from app.schemas.search import BulkImportResponse, BulkProductItem, ProductListResponse, ProductSummary
+from app.validation import read_validated_image
 
 logger = logging.getLogger(__name__)
 
@@ -57,14 +64,15 @@ _CONTENT_TYPE_TO_FILENAME = {
     "image/jpeg": "image.jpg",
     "image/png": "image.png",
 }
+_ALLOWED_CONTENT_TYPES = set(_CONTENT_TYPE_TO_FILENAME)
 
 
 @router.get("/products", response_model=ProductListResponse)
 @limiter.limit(PRODUCTS_RATE_LIMIT)
 async def list_products(
     request: Request,
-    category: str | None = Query(None, description="Exact category match, e.g. 'Shoes'."),
-    color: str | None = Query(None, description="Exact color match, e.g. 'red'."),
+    category: str | None = Query(None, max_length=CATEGORY_MAX_LENGTH, description="Exact category match, e.g. 'Shoes'."),
+    color: str | None = Query(None, max_length=COLOR_MAX_LENGTH, description="Exact color match, e.g. 'red'."),
 ) -> ProductListResponse:
     """List catalog products, optionally filtered by category and/or color.
 
@@ -103,10 +111,12 @@ async def create_product(
         pattern=SKU_PATTERN,
         description="Unique product identifier, e.g. 'shoe-purple'. Lowercase letters, digits, and hyphens only.",
     ),
-    name: str = Form(..., description="Human-readable product name."),
-    price: float = Form(..., gt=0, description="Product price."),
-    category: str = Form(..., description="Product category, e.g. 'Shoes'."),
-    color: str | None = Form(None, description="Dominant product color, e.g. 'purple'. Optional."),
+    name: str = Form(..., max_length=NAME_MAX_LENGTH, pattern=TEXT_PATTERN, description="Human-readable product name."),
+    price: float = Form(..., gt=0, le=MAX_PRICE, allow_inf_nan=False, description="Product price."),
+    category: str = Form(..., max_length=CATEGORY_MAX_LENGTH, pattern=TEXT_PATTERN, description="Product category, e.g. 'Shoes'."),
+    color: str | None = Form(
+        None, max_length=COLOR_MAX_LENGTH, pattern=TEXT_PATTERN, description="Dominant product color, e.g. 'purple'. Optional."
+    ),
     file: UploadFile = File(..., description="Product photo (JPEG or PNG)."),
 ) -> ProductSummary:
     """Add a new product: store its metadata and a CLIP embedding of its photo.
@@ -141,18 +151,13 @@ async def create_product(
         HTTPException 401: If the request is missing a valid
             `X-API-Key` header.
         HTTPException 409: If a product with this `sku` already exists.
+        HTTPException 413: If the uploaded file exceeds `MAX_UPLOAD_BYTES`.
+        HTTPException 422: If a text field is too long/contains control
+            characters, or `price` is out of range.
         HTTPException 429: If the caller has exceeded `CREATE_PRODUCT_RATE_LIMIT`.
         HTTPException 500: For any unexpected server-side failure.
     """
-    if file.content_type not in _CONTENT_TYPE_TO_FILENAME:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type '{file.content_type}'. Use JPEG or PNG.",
-        )
-
-    image_bytes = await file.read()
-    if not image_bytes:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty.")
+    image = await read_validated_image(file, _ALLOWED_CONTENT_TYPES)
 
     indexing_service = request.app.state.indexing_service
 
@@ -164,8 +169,8 @@ async def create_product(
             price=price,
             category=category,
             color=color,
-            image_bytes=image_bytes,
-            image_filename=_CONTENT_TYPE_TO_FILENAME[file.content_type],
+            image_bytes=image.data,
+            image_filename=_CONTENT_TYPE_TO_FILENAME[image.content_type],
         )
     except FileExistsError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -236,7 +241,9 @@ async def bulk_import_products(
             any entry fails validation (bad `sku` format, non-positive
             `price`, missing field), the batch is empty, the batch
             exceeds `MAX_BULK_IMPORT_ITEMS`, or any file is
-            missing/empty/an unsupported content type.
+            missing/empty/an unsupported or corrupt image.
+        HTTPException 413: If any file exceeds `MAX_UPLOAD_BYTES`, or
+            the images together exceed `MAX_BULK_IMPORT_TOTAL_BYTES`.
         HTTPException 401: If the request is missing a valid
             `X-API-Key` header.
         HTTPException 429: If the caller has exceeded `BULK_IMPORT_RATE_LIMIT`.
@@ -277,19 +284,15 @@ async def bulk_import_products(
     # request instead of leaving the first 39 jobs queued with no way
     # to cancel them.
     validated: list[tuple[BulkProductItem, bytes, str]] = []
+    total_bytes = 0
     for index, (item, file) in enumerate(zip(items, files)):
-        if file.content_type not in _CONTENT_TYPE_TO_FILENAME:
+        image = await read_validated_image(file, _ALLOWED_CONTENT_TYPES, label=f"products[{index}] ('{item.sku}')")
+        total_bytes += len(image.data)
+        if total_bytes > MAX_BULK_IMPORT_TOTAL_BYTES:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"products[{index}] ('{item.sku}'): unsupported file type '{file.content_type}'. Use JPEG or PNG.",
+                status_code=413, detail=f"Batch is too large (max {MAX_BULK_IMPORT_TOTAL_BYTES} bytes of images in total)."
             )
-        image_bytes = await file.read()
-        if not image_bytes:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"products[{index}] ('{item.sku}'): uploaded file is empty.",
-            )
-        validated.append((item, image_bytes, _CONTENT_TYPE_TO_FILENAME[file.content_type]))
+        validated.append((item, image.data, _CONTENT_TYPE_TO_FILENAME[image.content_type]))
 
     batch_id = uuid.uuid4().hex[:12]
     for index, (item, image_bytes, image_filename) in enumerate(validated):

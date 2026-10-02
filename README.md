@@ -717,8 +717,9 @@ doesn't include `.webp`.
 | Situation | HTTP status |
 |---|---|
 | `sku` already exists | 409 |
-| Invalid `sku` format, non-positive `price`, or a missing required field | 422 |
-| Unsupported/missing/corrupt image | 400 |
+| Invalid `sku` format, `price` outside (0, 1,000,000] or NaN/inf, over-long or control-character text field, or a missing required field | 422 |
+| Unsupported/missing/empty/corrupt image, contents not matching the declared type, or too many pixels | 400 |
+| Image larger than `MAX_UPLOAD_BYTES` (default 10 MB) | 413 |
 | Missing/invalid `X-API-Key` | 401 |
 | Rate limit exceeded (`CREATE_PRODUCT_RATE_LIMIT`, default 10/minute — tighter than `GET /products`' 60/minute, since this runs CLIP inference and writes to disk) | 429 |
 
@@ -836,8 +837,9 @@ the whole request rather than partially queuing it.
 |---|---|
 | `products` isn't valid JSON, isn't an array, is empty, or exceeds `MAX_BULK_IMPORT_ITEMS` | 400 |
 | `products`/`files` counts don't match | 400 |
-| An entry fails validation (bad `sku`, non-positive `price`, missing field) | 400 |
-| A file is missing/empty/unsupported content type | 400 |
+| An entry fails validation (bad `sku`, out-of-range `price`, over-long/control-character text, missing field) | 400 |
+| A file is missing/empty/unsupported or corrupt, its contents don't match its declared type, or it has too many pixels | 400 |
+| A file exceeds `MAX_UPLOAD_BYTES`, the images total more than `MAX_BULK_IMPORT_TOTAL_BYTES` (default 100 MB), or the request's `Content-Length` exceeds the body cap | 413 |
 | Missing/invalid `X-API-Key` | 401 |
 | Rate limit exceeded (`BULK_IMPORT_RATE_LIMIT`, default 5/minute — the tightest of the three `/products` limits, since this reads every file in the batch into memory) | 429 |
 
@@ -1022,6 +1024,26 @@ docker-compose up -d backend
 # local Python:
 export SEARCH_RATE_LIMIT="50/minute"
 ```
+
+### Input validation
+
+All image uploads (`/search`, `/products`, `/products/import`) go through
+`app/validation.py` before any decoding or CLIP work: the declared
+content type must be allowed, the file must be within `MAX_UPLOAD_BYTES`
+(10 MB, read in chunks) and non-empty, and the *actual* format sniffed
+from the bytes must be allowed and match the declared type (so a script
+labeled `image/png` is rejected). It must also decode as an image and
+stay under `MAX_IMAGE_PIXELS` (25 MP, a decompression-bomb guard).
+`BodySizeLimitMiddleware` additionally rejects requests whose
+`Content-Length` exceeds `MAX_BULK_IMPORT_TOTAL_BYTES` + 1 MB with a 413
+before the body is parsed.
+
+Product text fields (`name` ≤ 200 chars, `category` ≤ 100, `color` ≤ 50)
+must start with a non-whitespace character and contain no control
+characters; `price` must be in (0, 1,000,000] and finite. `GET /products`
+filters are length-capped too. The size/pixel limits are env-overridable
+(`MAX_UPLOAD_BYTES`, `MAX_IMAGE_PIXELS`, `MAX_BULK_IMPORT_TOTAL_BYTES`);
+the text/price limits are constants in `app/config.py`.
 
 **Setting the key:** `docker-compose.yml` sets `API_KEY=dev-api-key-change-me`
 for local use. **Change it** before running this anywhere reachable by

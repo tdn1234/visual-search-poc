@@ -518,6 +518,29 @@ decorator-based API don't compose cleanly through FastAPI's route
 introspection. Every other module keeps the future import; only these
 two routers omit it.
 
+## Input validation
+
+Untrusted input is checked at the HTTP edge, before any expensive work:
+
+- **Uploads** (`app/validation.py::read_validated_image`, used by all
+  three image routes): declared type allowed -> read in 64 KB chunks
+  against `MAX_UPLOAD_BYTES` (413; never trusts `Content-Length`) ->
+  non-empty -> Pillow sniffs the real format from the bytes, which must
+  be allowed and match the declared type -> pixel count under
+  `MAX_IMAGE_PIXELS` (decompression bomb) -> `Image.verify()`. The
+  stored filename in `POST /products` comes from the sniffed format.
+  `EmbeddingService` also maps `OSError` (truncated data) to the same
+  `ValueError` -> 400 as an unidentifiable image.
+- **Request size** (`BodySizeLimitMiddleware`): a pure-ASGI check of the
+  declared `Content-Length` so oversized bodies are refused before the
+  multipart parser spools them. Chunked bodies without the header fall
+  back to the per-file cap.
+- **Metadata**: `NAME/CATEGORY/COLOR_MAX_LENGTH`, `TEXT_PATTERN` (no
+  leading whitespace, no control characters -- these values reach
+  `metadata.json`, SQL rows and log lines) and `MAX_PRICE` /
+  `allow_inf_nan=False`, shared by the `POST /products` form and
+  `BulkProductItem`.
+
 ## Logging and request correlation
 
 A third cross-cutting concern, alongside auth and rate limiting, also
