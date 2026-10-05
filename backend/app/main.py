@@ -43,7 +43,7 @@ from app.services.recommendation_service import RecommendationService
 configure_logging()
 logger = logging.getLogger(__name__)
 
-_DEFAULT_API_KEY = "dev-api-key-change-me"
+_DEFAULT_API_KEY = "api-key"
 
 
 @asynccontextmanager

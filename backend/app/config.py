@@ -46,7 +46,7 @@ DATABASE_URL: str = os.environ.get(
 # The default below only works for local/dev use; always override it via
 # the `API_KEY` env var (docker-compose does) before exposing this
 # anywhere other than your own machine.
-API_KEY: str = os.environ.get("API_KEY", "dev-api-key-change-me")
+API_KEY: str = os.environ.get("API_KEY", "api-key")
 
 # Redis backs the request-rate limiter (`slowapi`) so limits are shared
 # across all backend replicas, not just tracked per-process. Default
@@ -147,8 +147,8 @@ MAX_IMAGE_PIXELS: int = int(os.environ.get("MAX_IMAGE_PIXELS", "25000000"))
 
 # Whole-request cap for POST /products/import (many files at once). Also
 # enforced up front, from Content-Length, by app.middleware.BodySizeLimitMiddleware.
-MAX_BULK_IMPORT_TOTAL_BYTES: int = int(os.environ.get("MAX_BULK_IMPORT_TOTAL_BYTES", str(100 * 1024 * 1024)))
-MAX_REQUEST_BODY_BYTES: int = MAX_BULK_IMPORT_TOTAL_BYTES + 1024 * 1024  # + multipart/form overhead
+MAX_BULK_IMPORT_TOTAL_BYTES: int = int(os.environ.get("MAX_BULK_IMPORT_TOTAL_BYTES", str(2 * 1024 * 1024)))
+MAX_REQUEST_BODY_BYTES: int = MAX_BULK_IMPORT_TOTAL_BYTES + 1024 * 256  # + multipart/form overhead
 
 # Free-text product metadata: bounded length, first char non-whitespace,
 # no control characters (newlines, NULs, ...) -- these end up in
@@ -170,5 +170,10 @@ METADATA_FILENAME: str = "metadata.json"
 # A new product's `sku` becomes a literal catalog/<sku>/ folder name
 # (see IndexingService.add_product), so this doubles as a path-traversal
 # guard, not just a style rule: lowercase letters/digits/hyphens only,
-# no leading/trailing hyphen, no "..", "/", or "\".
-SKU_PATTERN: str = r"^[a-z0-9]+(?:-[a-z0-9]+)*$"
+# no leading/trailing/double hyphen, no "..", "/", or "\". Length is
+# capped at 100 (bounded repeat; no lookahead, which pydantic's Rust
+# regex engine doesn't support) so the folder name stays well under the
+# filesystem's 255-byte limit (a longer sku would otherwise surface as a
+# 500 from `OSError: File name too long`).
+SKU_MAX_LENGTH: int = 100
+SKU_PATTERN: str = rf"^[a-z0-9](?:-?[a-z0-9]){{0,{SKU_MAX_LENGTH - 1}}}$"
