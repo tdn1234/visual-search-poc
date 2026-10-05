@@ -111,6 +111,11 @@ class ProductPayloadBuilder
         if ($code === '') {
             return null;
         }
+        // getAttributeText() fatals (getSource() on false) when the configured
+        // attribute code doesn't exist in this store, so treat that as "no color".
+        if (!$product->getResource()->getAttribute($code)) {
+            return null;
+        }
         $value = $product->getAttributeText($code);
         if (is_array($value)) {
             $value = reset($value);
