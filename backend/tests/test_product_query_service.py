@@ -116,6 +116,15 @@ def test_list_products_filters_combine_with_and():
     assert params == ["Shoes", "red"]
 
 
+def test_list_products_max_price_is_inclusive_and_parameterized():
+    pool = FakePool(results=[[]])
+    ProductQueryService(pool).list_products(color="red", max_price=80.0)
+
+    sql, params = _last_call(pool)
+    assert "WHERE color ILIKE %s AND price <= %s" in sql
+    assert params == ["red", 80.0]
+
+
 def test_list_products_single_filter():
     pool = FakePool(results=[[]])
     ProductQueryService(pool).list_products(color="red")

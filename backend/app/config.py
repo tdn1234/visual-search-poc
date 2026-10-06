@@ -177,3 +177,14 @@ METADATA_FILENAME: str = "metadata.json"
 # 500 from `OSError: File name too long`).
 SKU_MAX_LENGTH: int = 100
 SKU_PATTERN: str = rf"^[a-z0-9](?:-?[a-z0-9]){{0,{SKU_MAX_LENGTH - 1}}}$"
+
+
+####### Agent configuration ###########
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen3:8b")
+AGENT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "5"))
+AGENT_RATE_LIMIT = os.environ.get("AGENT_RATE_LIMIT", "10/minute")
+#  In docker-compose.yml the backend container must reach the host's Ollama:
+#   OLLAMA_URL=http://host.docker.internal:11434
+
+####### End Agent configuration #######

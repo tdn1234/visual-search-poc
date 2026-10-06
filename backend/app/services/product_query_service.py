@@ -131,7 +131,12 @@ class ProductQueryService:
             for row in rows
         ]
 
-    def list_products(self, category: str | None = None, color: str | None = None) -> list[ProductSummary]:
+    def list_products(
+        self,
+        category: str | None = None,
+        color: str | None = None,
+        max_price: float | None = None,
+    ) -> list[ProductSummary]:
         """Plain metadata filter, no embeddings/ranking involved.
 
         `category`/`color` combine as **AND** -- both given narrows to
@@ -144,6 +149,8 @@ class ProductQueryService:
             color: If given, only return products with this color
                 (case-insensitive, exact). A product with no color set
                 never matches.
+            max_price: If given, only return products priced at or
+                below this value (ANDed with the other filters).
 
         Returns:
             Every matching product, sorted by sku.
@@ -156,6 +163,9 @@ class ProductQueryService:
         if color is not None:
             clauses.append("color ILIKE %s")
             params.append(color)
+        if max_price is not None:
+            clauses.append("price <= %s")
+            params.append(max_price)
         where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
 
         sql = f"SELECT sku, name, price, category, color FROM products {where_sql} ORDER BY sku"
@@ -166,3 +176,13 @@ class ProductQueryService:
             ProductSummary(sku=row[0], name=row[1], price=row[2], category=row[3], color=row[4])
             for row in rows
         ]
+
+    def get_product(self, sku: str) -> ProductSummary | None:
+        """Look up one product by exact sku (no embedding loaded). `None` if not indexed."""
+        with self._db_pool.connection() as conn:
+            row = conn.execute(
+                "SELECT sku, name, price, category, color FROM products WHERE sku = %s", (sku,)
+            ).fetchone()
+        if row is None:
+            return None
+        return ProductSummary(sku=row[0], name=row[1], price=row[2], category=row[3], color=row[4])
