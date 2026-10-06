@@ -88,6 +88,7 @@ visual-search-poc/
 │   │   ├── category_classifier.pt   # trained classifier weights (optional, generated)
 │   │   ├── training/                # synthetic + imported real training set (generated)
 │   │   └── real_training/           # your real photos to import (gitignored, you provide)
+│   ├── logs/                        # rotating log files: app.log, worker.log (generated, gitignored)
 │   ├── tests/                       # pytest unit suite (fakes only: no Postgres/Redis/RabbitMQ/CLIP)
 │   ├── pytest.ini
 │   ├── requirements.txt

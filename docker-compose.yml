@@ -117,6 +117,8 @@ services:
       # lives in the `db` service (see backend/app/db.py), not here.
       - ./catalog:/app/catalog
       - ./backend/data:/app/backend/data
+      # Rotating log file (backend/logs/app.log) survives container re-creation.
+      - ./backend/logs:/app/backend/logs
       # Persist the downloaded CLIP weights across container restarts
       # and rebuilds (first run downloads ~600MB from Hugging Face).
       - huggingface_cache:/root/.cache/huggingface
@@ -143,6 +145,8 @@ services:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/visual_search
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      # Own file: log rotation isn't safe when two processes share one.
+      - LOG_FILE=/app/backend/logs/worker.log
     depends_on:
       db:
         condition: service_healthy
@@ -156,6 +160,7 @@ services:
       # instead of an inline request.
       - ./catalog:/app/catalog
       - ./backend/data:/app/backend/data
+      - ./backend/logs:/app/backend/logs
       - huggingface_cache:/root/.cache/huggingface
     command: python scripts/run_worker.py
 

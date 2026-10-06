@@ -7,4 +7,5 @@ backend/data/color_adapter.pt
 backend/data/category_classifier.pt
 backend/data/real_training/
 backend/data/test_uploads/
+backend/logs/
 .env

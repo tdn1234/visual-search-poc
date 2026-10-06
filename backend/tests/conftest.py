@@ -14,6 +14,7 @@ import os
 # In-memory rate-limit storage, and limits that are effectively off --
 # except /search, kept low so the 429 test only needs a handful of calls.
 os.environ["REDIS_URL"] = "memory://"
+os.environ["LOG_FILE"] = ""  # tests must not write into backend/logs
 os.environ["SEARCH_RATE_LIMIT"] = "5/minute"
 os.environ["PRODUCTS_RATE_LIMIT"] = "1000/minute"
 os.environ["CREATE_PRODUCT_RATE_LIMIT"] = "1000/minute"

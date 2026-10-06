@@ -84,3 +84,69 @@ def test_health_check_needs_no_api_key(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+# --- file logging -----------------------------------------------------------
+
+
+def _file_handlers():
+    import logging
+    import logging.handlers
+
+    return [h for h in logging.getLogger().handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+
+
+def test_configure_logging_writes_to_a_rotating_file_with_request_ids(tmp_path, monkeypatch):
+    import logging
+
+    from app import logging_config
+
+    log_file = tmp_path / "nested" / "app.log"
+    monkeypatch.setattr(logging_config, "LOG_FILE", str(log_file))
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers, root.level
+    try:
+        logging_config.configure_logging()
+        token = logging_config.request_id_var.set("req123")
+        logging.getLogger("app.test").warning("hello file")
+        logging_config.request_id_var.reset(token)
+        for handler in _file_handlers():
+            handler.flush()
+        assert "[WARNING] [req123] app.test: hello file" in log_file.read_text()
+    finally:
+        for handler in _file_handlers():
+            handler.close()
+        root.handlers, root.level = saved_handlers, saved_level
+
+
+def test_empty_log_file_setting_disables_file_logging(monkeypatch):
+    import logging
+
+    from app import logging_config
+
+    monkeypatch.setattr(logging_config, "LOG_FILE", "")
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers, root.level
+    try:
+        logging_config.configure_logging()
+        assert _file_handlers() == []
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level
+
+
+def test_unwritable_log_location_falls_back_to_console_only(tmp_path, monkeypatch):
+    import logging
+
+    from app import logging_config
+
+    blocker = tmp_path / "file"
+    blocker.write_text("x")  # a *file* where a directory is needed
+    monkeypatch.setattr(logging_config, "LOG_FILE", str(blocker / "app.log"))
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers, root.level
+    try:
+        logging_config.configure_logging()
+        assert _file_handlers() == []
+        assert root.handlers  # console handler still installed
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level

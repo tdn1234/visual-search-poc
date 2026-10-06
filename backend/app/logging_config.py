@@ -15,9 +15,11 @@ gets correlation for free.
 from __future__ import annotations
 
 import logging
+import logging.handlers
 from contextvars import ContextVar
+from pathlib import Path
 
-from app.config import LOG_LEVEL
+from app.config import LOG_FILE, LOG_FILE_BACKUP_COUNT, LOG_FILE_MAX_BYTES, LOG_LEVEL
 
 # Empty string outside a request (startup/shutdown logs, background
 # scripts) -- the format string below renders that as a blank field
@@ -30,7 +32,7 @@ request_id_var: ContextVar[str] = ContextVar("request_id", default="")
 # Setting LOG_LEVEL=DEBUG is meant to surface *our* per-request timing
 # breakdown, not third-party internals -- so these are pinned to
 # WARNING regardless of LOG_LEVEL.
-_NOISY_LOGGERS = ("multipart", "urllib3", "PIL", "httpcore", "httpx")
+_NOISY_LOGGERS = ("multipart", "urllib3", "PIL", "httpcore", "httpx", "pika")
 
 
 class _RequestIdFilter(logging.Filter):
@@ -42,23 +44,40 @@ class _RequestIdFilter(logging.Filter):
 
 
 def configure_logging() -> None:
-    """Set up the root logger's format, level, and request-ID filter.
+    """Set up the root logger's format, level, request-ID filter and handlers.
+
+    Logs go to the console and, unless `LOG_FILE` is empty, to a rotating
+    file (`LOG_FILE_MAX_BYTES` each, `LOG_FILE_BACKUP_COUNT` old files kept).
 
     Call this once, as early as possible in `main.py` -- every module
     in the app calls `logging.getLogger(__name__)` and inherits this
     configuration rather than configuring its own handlers.
     """
-    handler = logging.StreamHandler()
-    handler.addFilter(_RequestIdFilter())
-    handler.setFormatter(
-        logging.Formatter(
-            "%(asctime)s [%(levelname)s] [%(request_id)s] %(name)s: %(message)s"
-        )
-    )
+    formatter = logging.Formatter("%(asctime)s [%(levelname)s] [%(request_id)s] %(name)s: %(message)s")
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+
+    file_error: OSError | None = None
+    if LOG_FILE:
+        try:
+            Path(LOG_FILE).parent.mkdir(parents=True, exist_ok=True)
+            handlers.append(
+                logging.handlers.RotatingFileHandler(
+                    LOG_FILE, maxBytes=LOG_FILE_MAX_BYTES, backupCount=LOG_FILE_BACKUP_COUNT, encoding="utf-8"
+                )
+            )
+        except OSError as exc:  # e.g. read-only filesystem: keep console logging working
+            file_error = exc
+
+    for handler in handlers:
+        handler.addFilter(_RequestIdFilter())
+        handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(LOG_LEVEL)
-    root_logger.handlers = [handler]
+    root_logger.handlers = handlers
 
     for logger_name in _NOISY_LOGGERS:
         logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+    if file_error is not None:
+        logging.getLogger(__name__).warning("File logging disabled: cannot write %s (%s)", LOG_FILE, file_error)

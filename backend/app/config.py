@@ -31,6 +31,16 @@ DEVICE: str = "cpu"
 # "Logging and request correlation" section.
 LOG_LEVEL: str = os.environ.get("LOG_LEVEL", "INFO")
 
+# Logs are also written to a rotating file (in addition to the console) so they
+# survive container re-creation. Under the project (backend/logs/, gitignored;
+# docker-compose mounts it). Each process should use its own file (rotation
+# isn't safe across processes) -- the worker sets LOG_FILE=.../worker.log.
+# Set LOG_FILE to an empty string to disable file logging.
+LOG_DIR: Path = PROJECT_ROOT / "backend" / "logs"
+LOG_FILE: str = os.environ.get("LOG_FILE", str(LOG_DIR / "app.log"))
+LOG_FILE_MAX_BYTES: int = int(os.environ.get("LOG_FILE_MAX_BYTES", str(10 * 1024 * 1024)))
+LOG_FILE_BACKUP_COUNT: int = int(os.environ.get("LOG_FILE_BACKUP_COUNT", "5"))
+
 # --- Vector database (pgvector) --------------------------------------------
 # The product index (embeddings + metadata) lives in Postgres, not on
 # disk. In docker-compose this is overridden to point at the `db`

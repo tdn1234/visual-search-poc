@@ -686,13 +686,26 @@ Also at DEBUG:
 Both contain user text and tool results, so don't leave `DEBUG` on in
 production.
 
-Where the logs go: there is no log file. The app writes one stream
-(stderr) in the format `time [LEVEL] [request-id] logger: message`.
-In Docker read it with `docker logs -f visual-search-backend` (and
-`visual-search-worker`); with a local `uvicorn` it's the terminal, or
-redirect it (`... 2>&1 | tee app.log`). `LOG_LEVEL` (env var, default
-`INFO`) is the minimum severity printed: `DEBUG` < `INFO` < `WARNING` <
-`ERROR`. In Docker, set it via `LOG_LEVEL=DEBUG` in `docker-compose.yml`.
+Where the logs go: every line is written to the console (stderr) *and*
+to a rotating file in the project, so logs survive container
+re-creation (`docker compose down`, `up --build`):
+
+- `backend/logs/app.log` for the API, `backend/logs/worker.log` for the
+  import worker (one file per process -- rotation isn't safe when two
+  processes share a file). The folder is gitignored and mounted into both
+  containers by `docker-compose.yml`.
+- Rotates at `LOG_FILE_MAX_BYTES` (10 MB), keeping `LOG_FILE_BACKUP_COUNT`
+  (5) old files: `app.log.1`, `app.log.2`, ...
+- `LOG_FILE` overrides the path; set it to an empty string to disable file
+  logging (the tests do). If the location isn't writable the app logs a
+  warning and carries on with console logging only.
+- Format: `time [LEVEL] [request-id] logger: message`. Follow a request with
+  `grep <request-id> backend/logs/app.log`; live console output is still
+  `docker logs -f visual-search-backend`.
+
+`LOG_LEVEL` (env var, default `INFO`) is the minimum severity written:
+`DEBUG` < `INFO` < `WARNING` < `ERROR`. In Docker, set it via
+`LOG_LEVEL=DEBUG` in `docker-compose.yml`.
 
 ## Similarity ranking, step by step
 
