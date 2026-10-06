@@ -58,7 +58,9 @@ visual-search-poc/
 │   │   │   ├── indexing_service.py      # write path: whole-catalog reindex + single-product add
 │   │   │   ├── product_query_service.py # read path: pgvector search + metadata filter, per request
 │   │   │   ├── recommendation_service.py # shopper events + taste-vector recommendations
-│   │   │   └── attribute_classifier_service.py  # classify an uploaded image's category/color
+│   │   │   ├── attribute_classifier_service.py  # classify an uploaded image's category/color
+│   │   │   ├── agent_tools.py       # read-only tools + JSON schemas the local LLM agent can call
+│   │   │   └── agent_service.py     # agent loop: Ollama chat <-> tool calls (step cap, whitelist)
 │   │   ├── api/
 │   │   │   ├── search.py            # POST /search route
 │   │   │   ├── products.py          # GET /products, POST /products, POST /products/import routes
@@ -100,6 +102,7 @@ visual-search-poc/
 ├── docs/
 │   ├── architecture.md
 │   └── sample_embeddings.json       # illustrative format only
+├── LOCAL_AGENT_INTEGRATION.txt      # step-by-step plan for the local AI agent (Ollama)
 ├── LEARNING_PATH.txt                # Magento dev -> AI engineer study plan applied to this project
 └── README.md
 ```

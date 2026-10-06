@@ -414,6 +414,47 @@ in the response so a UI can label or hide the block accordingly.
 pgvector Postgres (decay ordering, exclusions, cold start, erasure), and
 the Magento client was exercised against the real routes.
 
+## Local AI agent
+
+`services/agent_service.py` adds natural-language chat on top of the
+existing services. It is a thin orchestrator: retrieval stays with
+CLIP and pgvector, and a local LLM (Ollama, default `qwen3:8b`) only
+decides which tool to call and how to phrase the answer. The
+step-by-step plan is in `LOCAL_AGENT_INTEGRATION.txt`; this covers the
+loop that exists so far (no HTTP endpoint or session memory yet).
+
+```
+messages = [system, *history, user]
+repeat up to AGENT_MAX_STEPS:
+    reply = ollama /api/chat (messages, TOOL_SCHEMAS)
+    no tool_calls  -> return reply (final answer)
+    each tool call -> run_tool -> append {"role": "tool", ...}
+cap hit -> "Sorry, I couldn't finish that."
+```
+
+Everything the model emits is untrusted, so:
+
+- **Whitelist.** Only the tools in `agent_tools.py` (`search_products`,
+  `search_similar_to_image`, `get_recommendations`, `get_product`) can
+  run; an unknown name comes back as an `{"error": ...}` the model can read.
+- **Validation.** Each tool validates its arguments with pydantic
+  (`extra="forbid"`) before touching a service.
+- **Errors don't abort.** Tool exceptions are logged and returned to the
+  model as `{"error": ...}` so it can retry or answer without the tool.
+- **Read-only tools.** No create/update/delete is exposed, which limits
+  what prompt injection via product text can do.
+- **Shopper isolation.** `get_recommendations` uses the `shopper_id`
+  passed to `AgentService.chat()` from the server-side session, never the
+  model's argument.
+- **Images stay server-side.** Uploads go in an `ImageStore`; the model
+  only sees an opaque ref like `img_1`.
+- **Non-blocking.** The LLM call uses an async `httpx` client and the
+  sync tools run via `run_in_threadpool`, so the event loop is never blocked.
+
+Settings (`config.py`): `OLLAMA_URL`, `AGENT_MODEL`, `AGENT_MAX_STEPS`,
+`AGENT_RATE_LIMIT`. Tests use a scripted fake client
+(`tests/test_agent_service.py`), so no Ollama is needed.
+
 ## Why embeddings are pre-normalized
 
 `ClipModel.encode_image` L2-normalizes every embedding it produces

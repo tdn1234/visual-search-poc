@@ -1,0 +1,163 @@
+ADDING A LOCAL AI AGENT TO THE VISUAL SEARCH PROJECT
+=====================================================
+
+Context: FastAPI backend with CLIP + pgvector, endpoints /search, /products,
+/recommendations, /events, plus Redis and RabbitMQ. Mac with 16 GB RAM.
+Ollama is not installed yet.
+
+
+1. WHAT THE AGENT SHOULD DO
+---------------------------
+CLIP handles "find products that look like this image". An agent adds
+natural-language conversation on top, and calls your existing endpoints as tools.
+
+Example requests:
+  - "Show me red running shoes under $80."
+      -> list_products(category, color), filter by price.
+  - User uploads a photo and says "like this, but in black".
+      -> image search, then filter by color.
+  - "What would I like?"
+      -> /recommendations for that shopper.
+  - "Why did you show me these?"
+      -> explain using the scores and metadata the tools returned.
+
+Keep the agent a thin orchestrator. Retrieval stays with CLIP and pgvector;
+the LLM only decides which tool to call and how to phrase the answer.
+
+
+2. RUNTIME AND MODEL CHOICE
+---------------------------
+Runtime : Ollama, installed natively on macOS (NOT in Docker). Docker on Mac
+          cannot use Metal GPU acceleration, so a containerized Ollama is slow.
+Model   : qwen3:8b or llama3.1:8b. Both support tool calling and fit in 16 GB
+          at Q4. Start with qwen3:8b.
+Vision  : qwen2.5vl:7b (optional; CLIP already understands the image).
+Other   : LM Studio or llama.cpp server (OpenAI-compatible APIs).
+
+
+3. SETUP STEPS
+--------------
+Step 1: Install and test Ollama
+    brew install ollama
+    ollama serve            # or: brew services start ollama
+    ollama pull qwen3:8b
+    ollama run qwen3:8b "say hi"
+
+Step 2: Check tool calling from curl
+    curl http://localhost:11434/api/chat -d '{
+      "model":"qwen3:8b","stream":false,
+      "messages":[{"role":"user","content":"red shoes under 80 dollars"}],
+      "tools":[{"type":"function","function":{"name":"search_products",
+        "description":"Search catalog","parameters":{"type":"object",
+        "properties":{"color":{"type":"string"},"max_price":{"type":"number"}}}}}]
+    }'
+  You should see message.tool_calls in the response. If so, the model can
+  drive the agent.
+
+Step 3: Add config to backend/app/config.py (same style as other settings)
+    OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+    AGENT_MODEL = os.environ.get("AGENT_MODEL", "qwen3:8b")
+    AGENT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "5"))
+    AGENT_RATE_LIMIT = os.environ.get("AGENT_RATE_LIMIT", "10/minute")
+  In docker-compose.yml the backend container must reach the host's Ollama:
+    OLLAMA_URL=http://host.docker.internal:11434
+
+Step 4: Add the dependency
+  Use httpx against Ollama's REST API, or the `ollama` Python package. Add it
+  to requirements.txt. httpx shows exactly what goes over the wire, which
+  helps when learning.
+
+Step 5: Write the tools in services/agent_tools.py
+  Each tool is a plain function wrapping a service you already have, plus a
+  JSON schema the LLM reads:
+    - search_products(category, color, max_price)
+        wraps ProductQueryService.list_products (add a price filter).
+    - search_similar_to_image(image_ref)
+        wraps ProductQueryService.search_similar. NEVER pass image bytes
+        through the LLM. Store the upload server-side and give the model an
+        opaque image_ref such as "img_1"; the tool looks up the bytes itself.
+    - get_recommendations(shopper_id)
+        wraps RecommendationService.recommend.
+    - get_product(sku)
+  Tool schemas must describe each function and parameter clearly; small
+  models depend on those descriptions. Return small JSON (sku, name, price,
+  score), never embeddings. Limit results to 5-10 items to save context.
+
+Step 6: Write the agent loop in services/agent_service.py
+    messages = [system_prompt, *history, user_msg]
+    for step in range(AGENT_MAX_STEPS):
+        resp = ollama.chat(model, messages, tools=TOOL_SCHEMAS)
+        messages.append(resp.message)
+        if not resp.message.tool_calls:
+            return resp.message.content          # final answer
+        for call in resp.message.tool_calls:
+            result = run_tool(call.name, call.arguments)   # validate args first
+            messages.append({"role": "tool", "name": call.name,
+                             "content": json.dumps(result)})
+    return "Sorry, I couldn't finish that."       # step cap hit
+  Rules:
+    - Cap the number of steps.
+    - Validate tool arguments with pydantic before running anything.
+    - Whitelist tool names; reject unknown names.
+    - Catch tool exceptions and return {"error": "..."} so the model can recover.
+    - The LLM call blocks: use run_in_threadpool or an async client so the
+      event loop is not blocked.
+
+Step 7: System prompt (keep it short and strict)
+    - Role: shopping assistant for this catalog.
+    - Use tools for all product facts; never invent SKUs or prices.
+    - If nothing matches, say so.
+    - Answer in 1-3 sentences and list products by name.
+
+Step 8: Endpoint in api/agent.py (register the router in main.py)
+    POST /agent/chat  (multipart: message, optional image,
+                       optional session_id / shopper_id)
+    -> { "reply": "...", "products": [ProductSummary...], "steps": [tool trace] }
+  - Reuse require_api_key, limiter.limit(AGENT_RATE_LIMIT), and the image
+    checks in validation.py.
+  - Return structured `products` next to the text so the UI renders cards from
+    real data, not model prose.
+  - Include the tool trace in dev; it makes debugging much easier.
+  - Keep conversation history in Redis keyed by session_id with a TTL; cap it
+    at roughly the last 10 messages.
+
+Step 9: Wire into the UI
+  The Magento connector can get a chat box that posts to /agent/chat, passing
+  the shopper id you already track for recommendations.
+
+
+4. THINGS THAT WILL BITE YOU
+----------------------------
+- Latency: an 8B model takes a few seconds per step, and an agent makes 2-3
+  calls. Consider streaming (stream: true with SSE) or a "thinking" indicator.
+- Prompt injection: product names/metadata are data, not instructions. Keep the
+  tool set READ-ONLY. Do not expose POST/PUT /products or
+  DELETE /shoppers/{id}/events without explicit user confirmation.
+- Shopper isolation: inject shopper_id from your server-side session, not from
+  the model's arguments, or a user could ask for someone else's recommendations.
+- Qwen3 thinking mode emits <think> blocks. Strip them or send "think": false.
+- Hallucinated arguments: small models invent categories. Pass the valid values
+  (distinct_categories(), distinct_colors()) in the prompt or as tool enums.
+- Context limits: Ollama's default context is small. Set options.num_ctx to
+  8192 if histories get long.
+
+
+5. TESTING
+----------
+- Unit-test each tool with no LLM (they are plain functions).
+- Unit-test the agent loop with a FAKE Ollama client returning scripted tool
+  calls. Check the step cap, bad arguments, unknown tools, and tool errors.
+- Build a small eval set of 15-20 prompts with expected tool + arguments and
+  rerun it whenever the model or prompt changes. This is how to compare
+  qwen3:8b against llama3.1:8b.
+
+
+6. SUGGESTED ORDER
+------------------
+1. Ollama + the curl tool-call test (Steps 1-2).
+2. Standalone scripts/agent_cli.py with the loop and two tools
+   (search_products, get_product). Get it working in the terminal, no API.
+3. Add the image tool and the image_ref pattern.
+4. Add the endpoint, auth, rate limit, and session memory.
+5. Add the fake-client tests and the eval set.
+6. Add streaming and the UI.
