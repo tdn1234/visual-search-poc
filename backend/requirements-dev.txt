@@ -2,5 +2,4 @@
 
 # --- Testing ---
 pytest==8.3.3
-# Starlette's TestClient (used for API route tests) needs httpx.
-httpx==0.27.2
+# (httpx, needed by Starlette's TestClient, is in requirements.txt.)

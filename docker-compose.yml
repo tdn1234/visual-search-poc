@@ -85,6 +85,9 @@ services:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/visual_search
       - REDIS_URL=redis://redis:6379/0
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
+      # Ollama runs natively on the host (Metal GPU), not in Docker; from
+      # inside the container, `localhost` is the container itself.
+      - OLLAMA_URL=http://host.docker.internal:11434
       # Dev-only default -- override this before exposing the API beyond
       # your own machine (main.py logs a warning at startup if you don't).
       # Uncomment to override the per-endpoint rate limits (defaults set
@@ -96,6 +99,8 @@ services:
       # classification, the pgvector query) for each request -- see
       # docs/architecture.md's "Logging and request correlation" section.
       # - LOG_LEVEL=DEBUG
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # no-op on Docker Desktop; needed on Linux
     depends_on:
       db:
         condition: service_healthy

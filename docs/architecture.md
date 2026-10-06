@@ -477,6 +477,12 @@ for uploads. Response:
 - Swagger (`/docs`): the route appears under the `agent` tag; use
   **Authorize** for the API key, then **Try it out** (omit the optional
   fields to leave them out). Needs Ollama, Postgres and Redis running.
+- Ollama runs natively on the host. In Docker, `docker-compose.yml`
+  sets `OLLAMA_URL=http://host.docker.internal:11434` (inside the
+  container `localhost` is the container itself); a local `uvicorn`
+  uses the default `http://localhost:11434`. "LLM backend error: All
+  connection attempts failed" in the logs means this URL is wrong or
+  Ollama isn't running (`ollama serve`).
 - Ollama unreachable/erroring -> 503; unexpected errors -> 500 with a
   generic message.
 

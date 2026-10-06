@@ -39,3 +39,7 @@ redis==5.0.8
 # RabbitMQ, not Redis -- a separate, dedicated broker from the Redis
 # used for rate limiting above. See app/queue.py's docstring.
 pika==1.3.2
+
+# --- Local AI agent ---
+# Async HTTP client for Ollama's /api/chat (see app/services/agent_service.py).
+httpx==0.27.2
