@@ -674,6 +674,26 @@ output from a `match_category=true&match_color=true` request shows
 attribute classification (686ms) dominating over CLIP embedding
 (136ms) and the pgvector query (4ms), not the vector search itself.
 
+Also at DEBUG:
+
+- **SQL.** `ProductQueryService` logs each statement and its parameters
+  just before running it (`SQL: SELECT ... | params=[...]`). Whitespace
+  is collapsed to one line and long list parameters, like the 512-float
+  query embedding, are summarized as `<512 values>`.
+- **Agent prompts.** `AgentService` logs the full message list sent to
+  the LLM before every step (`agent step N prompt: ...`).
+
+Both contain user text and tool results, so don't leave `DEBUG` on in
+production.
+
+Where the logs go: there is no log file. The app writes one stream
+(stderr) in the format `time [LEVEL] [request-id] logger: message`.
+In Docker read it with `docker logs -f visual-search-backend` (and
+`visual-search-worker`); with a local `uvicorn` it's the terminal, or
+redirect it (`... 2>&1 | tee app.log`). `LOG_LEVEL` (env var, default
+`INFO`) is the minimum severity printed: `DEBUG` < `INFO` < `WARNING` <
+`ERROR`. In Docker, set it via `LOG_LEVEL=DEBUG` in `docker-compose.yml`.
+
 ## Similarity ranking, step by step
 
 `ProductQueryService.search_similar` runs one SQL query per request --

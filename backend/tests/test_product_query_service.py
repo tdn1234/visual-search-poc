@@ -133,3 +133,33 @@ def test_list_products_single_filter():
     assert "WHERE color ILIKE %s" in sql
     assert "category" not in sql.split("FROM")[1]
     assert params == ["red"]
+
+
+# --- SQL logging ------------------------------------------------------------
+
+
+def test_sql_and_params_are_debug_logged_before_running_and_embedding_is_summarized(caplog):
+    import logging
+
+    pool = FakePool(results=[[]])
+    with caplog.at_level(logging.DEBUG, logger="app.services.product_query_service"):
+        ProductQueryService(pool).search_similar([0.1] * 512, top_k=5, category="Shoes")
+
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("SQL:"))
+    assert "WHERE category ILIKE %s" in line and "LIMIT %s" in line
+    assert "'Shoes'" in line and "<512 values>" in line
+    assert "0.1, 0.1" not in line  # raw vector must not be dumped
+
+
+def test_get_product_and_list_products_log_their_sql(caplog):
+    import logging
+
+    pool = FakePool(results=[[], []])
+    service = ProductQueryService(pool)
+    with caplog.at_level(logging.DEBUG, logger="app.services.product_query_service"):
+        service.get_product("shoe-red")
+        service.list_products(color="red", max_price=80)
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("SQL:")]
+    assert "WHERE sku = %s | params=['shoe-red']" in lines[0]
+    assert "color ILIKE %s AND price <= %s" in lines[1] and "['red', 80]" in lines[1]

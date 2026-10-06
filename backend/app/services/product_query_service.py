@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 
 from psycopg_pool import ConnectionPool
 
@@ -24,6 +25,20 @@ from app.config import TOP_K_RESULTS
 from app.schemas.search import ProductSummary, SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+def _log_sql(sql: str, params: Sequence | None = None) -> None:
+    """DEBUG-log a statement and its parameters just before it runs.
+
+    Whitespace is collapsed to one line, and long list parameters (the
+    512-float query embedding) are summarized so the log stays readable.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    shown = [
+        f"<{len(p)} values>" if isinstance(p, (list, tuple)) and len(p) > 8 else p for p in (params or ())
+    ]
+    logger.debug("SQL: %s | params=%s", " ".join(sql.split()), shown)
 
 
 class ProductQueryService:
@@ -36,21 +51,23 @@ class ProductQueryService:
     def count(self) -> int:
         """Return how many products are currently indexed."""
         with self._db_pool.connection() as conn:
+            _log_sql("SELECT count(*) FROM products")
             row = conn.execute("SELECT count(*) FROM products").fetchone()
         return row[0] if row else 0
 
     def distinct_categories(self) -> list[str]:
         """Every distinct `category` value currently in the catalog, sorted."""
         with self._db_pool.connection() as conn:
+            _log_sql("SELECT DISTINCT category FROM products ORDER BY category")
             rows = conn.execute("SELECT DISTINCT category FROM products ORDER BY category").fetchall()
         return [row[0] for row in rows]
 
     def distinct_colors(self) -> list[str]:
         """Every distinct non-null `color` value currently in the catalog, sorted."""
+        sql = "SELECT DISTINCT color FROM products WHERE color IS NOT NULL ORDER BY color"
         with self._db_pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT DISTINCT color FROM products WHERE color IS NOT NULL ORDER BY color"
-            ).fetchall()
+            _log_sql(sql)
+            rows = conn.execute(sql).fetchall()
         return [row[0] for row in rows]
 
     def search_similar(
@@ -112,6 +129,7 @@ class ProductQueryService:
         """
         start_time = time.perf_counter()
         with self._db_pool.connection() as conn:
+            _log_sql(sql, params)
             rows = conn.execute(sql, params).fetchall()
         logger.debug(
             "pgvector search_similar (top_k=%d, category=%r, color=%r) took %.1fms, %d rows",
@@ -170,6 +188,7 @@ class ProductQueryService:
 
         sql = f"SELECT sku, name, price, category, color FROM products {where_sql} ORDER BY sku"
         with self._db_pool.connection() as conn:
+            _log_sql(sql, params)
             rows = conn.execute(sql, params).fetchall()
 
         return [
@@ -179,10 +198,10 @@ class ProductQueryService:
 
     def get_product(self, sku: str) -> ProductSummary | None:
         """Look up one product by exact sku (no embedding loaded). `None` if not indexed."""
+        sql = "SELECT sku, name, price, category, color FROM products WHERE sku = %s"
         with self._db_pool.connection() as conn:
-            row = conn.execute(
-                "SELECT sku, name, price, category, color FROM products WHERE sku = %s", (sku,)
-            ).fetchone()
+            _log_sql(sql, (sku,))
+            row = conn.execute(sql, (sku,)).fetchone()
         if row is None:
             return None
         return ProductSummary(sku=row[0], name=row[1], price=row[2], category=row[3], color=row[4])
