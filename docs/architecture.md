@@ -421,7 +421,7 @@ existing services. It is a thin orchestrator: retrieval stays with
 CLIP and pgvector, and a local LLM (Ollama, default `qwen3:8b`) only
 decides which tool to call and how to phrase the answer. The
 step-by-step plan is in `LOCAL_AGENT_INTEGRATION.txt`; this covers the
-loop that exists so far (no HTTP endpoint or session memory yet).
+loop and its endpoint.
 
 ```
 messages = [system, *history, user]
@@ -451,9 +451,40 @@ Everything the model emits is untrusted, so:
 - **Non-blocking.** The LLM call uses an async `httpx` client and the
   sync tools run via `run_in_threadpool`, so the event loop is never blocked.
 
+### `POST /agent/chat`
+
+Multipart form: `message` (required), `file` (optional image),
+`session_id` and `shopper_id` (optional). Requires `X-API-Key`, is
+rate-limited by `AGENT_RATE_LIMIT`, and reuses `read_validated_image`
+for uploads. Response:
+
+```
+{"reply": "...", "products": [{sku, name, price, category, color?, score?}],
+ "session_id": "...", "steps": [...]}   # steps only if AGENT_INCLUDE_TRACE
+```
+
+- `products` is taken from the most recent tool call that returned
+  products, so a UI renders cards from real data rather than model prose.
+- An uploaded image is stored server-side; the model is told only
+  `image_ref=img_N`.
+- `session_id` (generated if omitted) keys the conversation history in
+  Redis (`agent_sessions.py`): plain user/assistant text only, last
+  `AGENT_HISTORY_MAX_MESSAGES` (10), expiring after
+  `AGENT_SESSION_TTL_SECONDS` of inactivity. If Redis is down the chat
+  still works, just without memory.
+- `shopper_id` comes from the (API-key-holding) storefront and is
+  injected into `get_recommendations` server-side.
+- Swagger (`/docs`): the route appears under the `agent` tag; use
+  **Authorize** for the API key, then **Try it out** (omit the optional
+  fields to leave them out). Needs Ollama, Postgres and Redis running.
+- Ollama unreachable/erroring -> 503; unexpected errors -> 500 with a
+  generic message.
+
 Settings (`config.py`): `OLLAMA_URL`, `AGENT_MODEL`, `AGENT_MAX_STEPS`,
-`AGENT_RATE_LIMIT`. Tests use a scripted fake client
-(`tests/test_agent_service.py`), so no Ollama is needed.
+`AGENT_RATE_LIMIT`, `AGENT_SESSION_TTL_SECONDS`,
+`AGENT_HISTORY_MAX_MESSAGES`, `AGENT_MESSAGE_MAX_LENGTH`,
+`AGENT_INCLUDE_TRACE`. Tests use a scripted fake LLM client and fake
+Redis, so no Ollama is needed.
 
 ## Why embeddings are pre-normalized
 

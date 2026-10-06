@@ -71,6 +71,18 @@ class AgentResult:
     reply: str
     # One entry per tool call: {"tool", "arguments", "result"} -- handy for debugging.
     steps: list[dict[str, Any]] = field(default_factory=list)
+    # Products from the most recent tool call that returned any (real data, for UI cards).
+    products: list[dict[str, Any]] = field(default_factory=list)
+
+
+def _products_from_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for step in reversed(steps):
+        result = step["result"]
+        if result.get("products"):
+            return list(result["products"])
+        if result.get("product"):
+            return [result["product"]]
+    return []
 
 
 class AgentService:
@@ -84,6 +96,8 @@ class AgentService:
         model: str = AGENT_MODEL,
         max_steps: int = AGENT_MAX_STEPS,
     ) -> None:
+        self._product_query_service = product_query_service
+        self._image_store = image_store
         self._chat_client = chat_client or OllamaChatClient()
         self._model = model
         self._max_steps = max_steps
@@ -96,6 +110,15 @@ class AgentService:
             "get_recommendations": lambda a: agent_tools.get_recommendations(recommendation_service, a),
             "get_product": lambda a: agent_tools.get_product(product_query_service, a),
         }
+
+    def add_image(self, image_bytes: bytes) -> str:
+        """Store an already-validated upload and return the opaque ref the model may use."""
+        return self._image_store.add(image_bytes)
+
+    async def aclose(self) -> None:
+        close = getattr(self._chat_client, "aclose", None)
+        if close is not None:
+            await close()
 
     def run_tool(self, name: str, arguments: Any, shopper_id: str | None = None) -> dict[str, Any]:
         """Run one tool call from the model; always returns a dict, never raises."""
@@ -125,6 +148,16 @@ class AgentService:
             logger.exception("Tool %s failed", name)
             return {"error": f"Tool '{name}' failed. Try different arguments or answer without it."}
 
+    async def _system_prompt(self) -> str:
+        """SYSTEM_PROMPT plus the catalog's real categories/colors, so the model doesn't invent filter values."""
+        try:
+            categories = await run_in_threadpool(self._product_query_service.distinct_categories)
+            colors = await run_in_threadpool(self._product_query_service.distinct_colors)
+        except Exception:
+            logger.warning("Could not load catalog values for the system prompt", exc_info=True)
+            return SYSTEM_PROMPT
+        return f"{SYSTEM_PROMPT} Valid categories: {', '.join(categories)}. Valid colors: {', '.join(colors)}."
+
     async def chat(
         self,
         message: str,
@@ -139,19 +172,24 @@ class AgentService:
             shopper_id: Server-side shopper identity, injected into shopper-scoped tools.
         """
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": await self._system_prompt()},
             *(history or []),
             {"role": "user", "content": message},
         ]
         steps: list[dict[str, Any]] = []
 
-        for _ in range(self._max_steps):
+        for step in range(1, self._max_steps + 1):
+            # DEBUG only: prompts contain user text and tool results.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("agent step %d prompt: %s", step, json.dumps(messages, default=str))
             reply = await self._chat_client.chat(self._model, messages, agent_tools.TOOL_SCHEMAS)
             messages.append(reply)
 
             tool_calls = reply.get("tool_calls")
             if not tool_calls:
-                return AgentResult(reply=_clean_reply(reply.get("content")), steps=steps)
+                return AgentResult(
+                    reply=_clean_reply(reply.get("content")), steps=steps, products=_products_from_steps(steps)
+                )
 
             for call in tool_calls:
                 function = call.get("function") or {}
@@ -162,7 +200,7 @@ class AgentService:
                 steps.append({"tool": name, "arguments": arguments, "result": result})
                 messages.append({"role": "tool", "name": name, "content": json.dumps(result)})
 
-        return AgentResult(reply=STEP_LIMIT_REPLY, steps=steps)
+        return AgentResult(reply=STEP_LIMIT_REPLY, steps=steps, products=_products_from_steps(steps))
 
 
 def _clean_reply(content: Any) -> str:

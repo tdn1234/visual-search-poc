@@ -60,10 +60,12 @@ visual-search-poc/
 │   │   │   ├── recommendation_service.py # shopper events + taste-vector recommendations
 │   │   │   ├── attribute_classifier_service.py  # classify an uploaded image's category/color
 │   │   │   ├── agent_tools.py       # read-only tools + JSON schemas the local LLM agent can call
-│   │   │   └── agent_service.py     # agent loop: Ollama chat <-> tool calls (step cap, whitelist)
+│   │   │   ├── agent_service.py     # agent loop: Ollama chat <-> tool calls (step cap, whitelist)
+│   │   │   └── agent_sessions.py    # Redis-backed conversation history (TTL + message cap)
 │   │   ├── api/
 │   │   │   ├── search.py            # POST /search route
 │   │   │   ├── products.py          # GET /products, POST /products, POST /products/import routes
+│   │   │   ├── agent.py             # POST /agent/chat (LLM shopping assistant)
 │   │   │   └── recommendations.py   # POST /events, GET /recommendations, DELETE /shoppers/{id}/events
 │   │   ├── db.py                    # Postgres connection pool + pgvector schema setup
 │   │   ├── auth.py                  # X-API-Key header check (require_api_key)

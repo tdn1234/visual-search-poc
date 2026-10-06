@@ -18,6 +18,8 @@ os.environ["SEARCH_RATE_LIMIT"] = "5/minute"
 os.environ["PRODUCTS_RATE_LIMIT"] = "1000/minute"
 os.environ["CREATE_PRODUCT_RATE_LIMIT"] = "1000/minute"
 os.environ["BULK_IMPORT_RATE_LIMIT"] = "1000/minute"
+os.environ["AGENT_RATE_LIMIT"] = "3/minute"
+os.environ["AGENT_INCLUDE_TRACE"] = "true"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -27,7 +29,9 @@ from app.config import API_KEY  # noqa: E402
 from app.main import app  # noqa: E402
 from app.rate_limit import limiter  # noqa: E402
 from tests.fakes import (  # noqa: E402
+    FakeAgentService,
     FakeAttributeClassifier,
+    FakeSessionStore,
     FakeEmbeddingService,
     FakeIndexingService,
     FakeProductQueryService,
@@ -76,6 +80,8 @@ def services():
             "attribute_classifier": FakeAttributeClassifier(),
             "indexing": FakeIndexingService(),
             "recommendation": FakeRecommendationService(),
+            "agent": FakeAgentService(),
+            "sessions": FakeSessionStore(),
         },
     )()
     app.state.embedding_service = fakes.embedding
@@ -83,6 +89,8 @@ def services():
     app.state.attribute_classifier_service = fakes.attribute_classifier
     app.state.indexing_service = fakes.indexing
     app.state.recommendation_service = fakes.recommendation
+    app.state.agent_service = fakes.agent
+    app.state.agent_session_store = fakes.sessions
     return fakes
 
 

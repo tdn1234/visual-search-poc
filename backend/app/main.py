@@ -18,15 +18,17 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
+import redis
 from fastapi import FastAPI
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from app.api.agent import router as agent_router
 from app.api.products import router as products_router
 from app.api.recommendations import router as recommendations_router
 from app.api.search import router as search_router
-from app.config import API_KEY, CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE, MAX_REQUEST_BODY_BYTES
+from app.config import API_KEY, REDIS_URL, CATEGORY_CLASSIFIER_FILE, COLOR_ADAPTER_FILE, MAX_REQUEST_BODY_BYTES
 from app.db import create_pool
 from app.logging_config import configure_logging
 from app.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
@@ -34,6 +36,9 @@ from app.models.category_classifier import load_category_classifier
 from app.models.clip_model import ClipModel
 from app.models.color_adapter import load_color_adapter
 from app.rate_limit import limiter
+from app.services.agent_service import AgentService
+from app.services.agent_sessions import SessionStore
+from app.services.agent_tools import ImageStore
 from app.services.attribute_classifier_service import AttributeClassifierService
 from app.services.embedding_service import EmbeddingService
 from app.services.indexing_service import IndexingService
@@ -84,10 +89,18 @@ async def lifespan(app: FastAPI):
     app.state.indexing_service = indexing_service
     app.state.attribute_classifier_service = attribute_classifier_service
     app.state.recommendation_service = recommendation_service
+    app.state.agent_service = AgentService(
+        product_query_service=product_query_service,
+        embedding_service=embedding_service,
+        recommendation_service=recommendation_service,
+        image_store=ImageStore(),
+    )
+    app.state.agent_session_store = SessionStore(redis.Redis.from_url(REDIS_URL, decode_responses=True))
 
     yield
 
     logger.info("Shutting down.")
+    await app.state.agent_service.aclose()
     db_pool.close()
 
 
@@ -111,6 +124,7 @@ app.add_middleware(RequestContextMiddleware)
 app.include_router(search_router)
 app.include_router(products_router)
 app.include_router(recommendations_router)
+app.include_router(agent_router)
 
 
 @app.get("/health", tags=["health"])

@@ -6,7 +6,7 @@ import asyncio
 import json
 
 from app.services import agent_tools
-from app.services.agent_service import STEP_LIMIT_REPLY, AgentService
+from app.services.agent_service import STEP_LIMIT_REPLY, SYSTEM_PROMPT, AgentService
 
 
 class ScriptedClient:
@@ -98,3 +98,29 @@ def test_shopper_id_comes_from_server_not_model():
     service.run_tool("get_recommendations", {"shopper_id": "someone-else"}, shopper_id="me")
     assert seen == {"shopper_id": "me"}
     assert "error" in service.run_tool("get_recommendations", {"shopper_id": "someone-else"})
+
+
+def test_system_prompt_lists_catalog_values_and_survives_lookup_failure():
+    class Query:
+        def distinct_categories(self):
+            return ["Bags", "Shoes"]
+
+        def distinct_colors(self):
+            return ["red"]
+
+    service = AgentService(Query(), None, None, agent_tools.ImageStore(), chat_client=ScriptedClient([]))
+    prompt = run(service._system_prompt())
+    assert "Valid categories: Bags, Shoes." in prompt and "Valid colors: red." in prompt
+
+    broken = _service(ScriptedClient([]))  # product_query_service is None -> lookup raises
+    assert run(broken._system_prompt()) == SYSTEM_PROMPT
+
+
+def test_products_come_from_the_last_tool_call_that_returned_some():
+    client = ScriptedClient([
+        _tool_reply("get_product", {"sku": "a"}),
+        _tool_reply("delete_everything", {}),
+        {"role": "assistant", "content": "done"},
+    ])
+    result = run(_service(client).chat("x"))
+    assert result.products == [{"sku": "a"}]

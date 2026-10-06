@@ -244,3 +244,49 @@ class FakeRecommendationService:
             raise self.error
         self.delete_calls.append(shopper_id)
         return self.deleted
+
+
+class FakeAgentService:
+    """Stands in for `AgentService` in API tests; records what the endpoint passed in."""
+
+    def __init__(self) -> None:
+        from app.services.agent_service import AgentResult
+
+        self.result = AgentResult(
+            reply="Here you go.",
+            steps=[{"tool": "get_product", "arguments": {"sku": "shoe-red"}, "result": {}}],
+            products=[{"sku": "shoe-red", "name": "Red Shoe", "price": 99.0, "category": "Shoes", "score": 0.9}],
+        )
+        self.error: Exception | None = None
+        self.chat_calls: list[dict] = []
+        self.images: list[bytes] = []
+
+    def add_image(self, image_bytes: bytes) -> str:
+        self.images.append(image_bytes)
+        return f"img_{len(self.images)}"
+
+    async def chat(self, message, history=None, shopper_id=None):
+        if self.error:
+            raise self.error
+        self.chat_calls.append({"message": message, "history": history, "shopper_id": shopper_id})
+        return self.result
+
+
+class FakeSessionStore:
+    def __init__(self) -> None:
+        self.sessions: dict[str, list[dict]] = {}
+        self.error: Exception | None = None
+
+    def load(self, session_id):
+        if self.error:
+            raise self.error
+        return list(self.sessions.get(session_id, []))
+
+    def append_turn(self, session_id, history, user_message, reply):
+        if self.error:
+            raise self.error
+        self.sessions[session_id] = [
+            *history,
+            {"role": "user", "content": user_message},
+            {"role": "assistant", "content": reply},
+        ]

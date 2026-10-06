@@ -186,5 +186,12 @@ AGENT_MAX_STEPS = int(os.environ.get("AGENT_MAX_STEPS", "5"))
 AGENT_RATE_LIMIT = os.environ.get("AGENT_RATE_LIMIT", "10/minute")
 #  In docker-compose.yml the backend container must reach the host's Ollama:
 #   OLLAMA_URL=http://host.docker.internal:11434
+# Conversation history lives in Redis, keyed by session_id, and expires
+# after this many idle seconds. Only the last N user/assistant messages are kept.
+AGENT_SESSION_TTL_SECONDS = int(os.environ.get("AGENT_SESSION_TTL_SECONDS", "1800"))
+AGENT_HISTORY_MAX_MESSAGES = int(os.environ.get("AGENT_HISTORY_MAX_MESSAGES", "10"))
+AGENT_MESSAGE_MAX_LENGTH = int(os.environ.get("AGENT_MESSAGE_MAX_LENGTH", "2000"))
+# Return the tool trace ("steps") in /agent/chat responses. Debug aid; leave off in production.
+AGENT_INCLUDE_TRACE = os.environ.get("AGENT_INCLUDE_TRACE", "false").lower() in ("1", "true", "yes")
 
 ####### End Agent configuration #######
