@@ -30,6 +30,7 @@ Stores > Configuration > Services > **Visual Search**
 | Only Match Detected Category / Color | Passes `match_category` / `match_color` to `POST /search` |
 | Track Shopper Events | Report views / add-to-carts / purchases (default on once the module is enabled) |
 | Show "Recommended for you" + Products to Show | Personalized block on the home and product pages (default off) |
+| Show Chat Widget + Assistant Timeout | AI shopping-assistant chat box on every storefront page (default off; needs the service's Ollama agent) |
 
 ## Features
 
@@ -42,6 +43,7 @@ Stores > Configuration > Services > **Visual Search**
 | Sync status logging | Every attempt is a row in `visual_search_sync_log` |
 | Log history page | Catalog > **Visual Search Sync Log** (filterable by status/type/SKU/date) |
 | Search by image | "Search by Image" header link, plus an upload form on the search results page |
+| Shopping assistant chat | Floating chat box (bottom-right) posting to `POST /agent/chat` via `visualsearch/chat/send`; text or a photo, replies with product cards |
 | Personalized recommendations | "Recommended for you" block on the home page and product pages (`GET /recommendations`), fed by shopper tracking (`POST /events`) |
 
 ### Personalized recommendations
@@ -61,6 +63,27 @@ leaves that product out. New shoppers see the store's popular items.
 
 Events are best-effort: if the API is down they are logged and dropped.
 Make sure tracking is covered by your cookie-consent/privacy policy.
+
+### Shopping assistant chat
+
+Enable **Show Chat Widget** (Services > Visual Search > Shopping Assistant).
+The widget (`js/chat.js`) posts the message and optional photo to the
+module's JSON endpoint `visualsearch/chat/send`, which calls the service's
+`POST /agent/chat`. Notes:
+
+- The shopper id is the same `c<id>` / `vs_shopper` cookie id used for
+  recommendations, resolved on the server (never sent by the browser), so
+  "what would I like?" uses that shopper's history.
+- The conversation's `session_id` is kept in `sessionStorage`; the service
+  holds the history briefly in Redis.
+- Product cards are rebuilt from the service's SKUs and re-checked against
+  the storefront (enabled, visible, in-store) -- the same as search. The
+  assistant's *text* is the model's, so it may still name a product that
+  has no card.
+- The upload is validated by content (JPEG/PNG/WEBP, 5 MB). The CSRF
+  `form_key` is sent automatically. Responses are never cached.
+- A local LLM is slow, hence the separate **Assistant Timeout** (default
+  120 s). The service must be able to reach Ollama (see the root README).
 
 ### Bulk sync needs a queue consumer
 

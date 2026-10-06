@@ -112,6 +112,33 @@ class Client
     }
 
     /**
+     * POST /agent/chat -- one turn with the shopping assistant (multipart form).
+     * Optional fields are omitted when empty. The LLM is slow, so the request gets its own timeout.
+     *
+     * @param array{bytes: string, mime: string, filename: string}|null $image
+     * @throws ApiException
+     */
+    public function chat(string $message, ?string $shopperId, ?string $sessionId, ?array $image, int $timeout): Response
+    {
+        $multipart = [['name' => 'message', 'contents' => $message]];
+        if ($shopperId !== null && $shopperId !== '') {
+            $multipart[] = ['name' => 'shopper_id', 'contents' => $shopperId];
+        }
+        if ($sessionId !== null && $sessionId !== '') {
+            $multipart[] = ['name' => 'session_id', 'contents' => $sessionId];
+        }
+        if ($image !== null) {
+            $multipart[] = [
+                'name' => 'file',
+                'filename' => $image['filename'],
+                'contents' => $image['bytes'],
+                'headers' => ['Content-Type' => $image['mime']],
+            ];
+        }
+        return $this->request('POST', '/agent/chat', ['multipart' => $multipart, 'timeout' => $timeout]);
+    }
+
+    /**
      * POST /events -- record shopper behavior (view / add_to_cart / purchase).
      *
      * @param array<int, array{shopper_id: string, sku: string, event_type: string, occurred_at?: string}> $events

@@ -294,6 +294,7 @@ existing endpoint:
 | Manual "Sync to Visual Search" button; on-save sync ("immediate" mode) | `POST /products` | Synchronous, so the outcome (`201` created / `409` exists, followed by `PUT /products/{sku}` / `400` bad input) is known immediately and logged |
 | Product-grid mass action; on-save sync ("queue" mode) | `POST /products/import` | Async batches (≤100). Magento publishes to its own DB queue and a consumer sends the batches, so an admin click never waits on CLIP |
 | Storefront "Search by Image" | `POST /search` | Result SKUs are mapped back to Magento products and re-checked against the storefront (enabled, visible, in-store) |
+| Chat widget ("Shopping assistant") | `POST /agent/chat` | Browser -> Magento JSON endpoint -> API, so the API key and shopper id stay server-side; the SKUs in the reply are mapped back to storefront products like search results |
 | Shopper tracking (view / add to cart / purchase) | `POST /events` | Queued in Magento and forwarded by a consumer, so the API can never slow a page or checkout |
 | "Recommended for you" block | `GET /recommendations` | Loaded by AJAX per visitor -- the host page is full-page-cached and shared, so personal results can't be rendered into it |
 

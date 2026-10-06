@@ -23,6 +23,10 @@
                 <enabled>0</enabled>
                 <limit>6</limit>
             </recommendations>
+            <chat>
+                <enabled>0</enabled>
+                <timeout>120</timeout>
+            </chat>
         </visual_search>
     </default>
 </config>

@@ -87,3 +87,69 @@
 .visualsearch-recs__price {
     font-weight: 700;
 }
+
+/* Shopping assistant chat widget */
+.visualsearch-chat-container { position: fixed; right: 16px; bottom: 16px; z-index: 900; }
+.visualsearch-chat__toggle {
+    padding: 10px 18px;
+    border: 0;
+    border-radius: 24px;
+    background: #1979c3;
+    color: #fff;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, .3);
+}
+.visualsearch-chat__panel {
+    position: absolute;
+    right: 0;
+    bottom: 48px;
+    display: flex;
+    flex-direction: column;
+    width: 340px;
+    max-width: calc(100vw - 32px);
+    height: 480px;
+    max-height: calc(100vh - 96px);
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    background: #fff;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
+}
+.visualsearch-chat__panel[hidden] { display: none; }
+.visualsearch-chat__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    background: #1979c3;
+    color: #fff;
+    font-weight: 600;
+}
+.visualsearch-chat__close { border: 0; background: none; color: #fff; font-size: 20px; cursor: pointer; }
+.visualsearch-chat__log { flex: 1; padding: 12px; overflow-y: auto; }
+.visualsearch-chat__msg {
+    max-width: 85%;
+    margin: 0 0 8px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+}
+.visualsearch-chat__msg--assistant { background: #f0f0f0; }
+.visualsearch-chat__msg--user { margin-left: auto; background: #d6e9f8; }
+.visualsearch-chat__msg--error { background: #fae5e5; color: #b00; }
+.visualsearch-chat__products {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px;
+    margin: 0 0 8px;
+    padding: 0;
+    list-style: none;
+}
+.visualsearch-chat__product-link { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.visualsearch-chat__product-link img { max-width: 100%; height: auto; }
+.visualsearch-chat__product-price { font-weight: 600; }
+.visualsearch-chat__file { padding: 0 12px; font-size: 12px; color: #666; }
+.visualsearch-chat__form { display: flex; gap: 6px; padding: 10px 12px; border-top: 1px solid #ddd; }
+.visualsearch-chat__input { flex: 1; min-width: 0; }
+.visualsearch-chat__attach, .visualsearch-chat__send { cursor: pointer; }

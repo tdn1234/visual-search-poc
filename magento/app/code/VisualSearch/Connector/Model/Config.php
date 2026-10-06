@@ -25,6 +25,8 @@ class Config
     private const PATH_TRACK_EVENTS = 'visual_search/recommendations/track_events';
     private const PATH_RECOMMENDATIONS = 'visual_search/recommendations/enabled';
     private const PATH_RECOMMENDATION_LIMIT = 'visual_search/recommendations/limit';
+    private const PATH_CHAT = 'visual_search/chat/enabled';
+    private const PATH_CHAT_TIMEOUT = 'visual_search/chat/timeout';
 
     /** The API rejects import batches larger than this (MAX_BULK_IMPORT_ITEMS default). */
     public const MAX_CHUNK_SIZE = 100;
@@ -101,6 +103,17 @@ class Config
     public function areRecommendationsEnabled(): bool
     {
         return $this->isEnabled() && $this->scopeConfig->isSetFlag(self::PATH_RECOMMENDATIONS);
+    }
+
+    public function isChatEnabled(): bool
+    {
+        return $this->isEnabled() && $this->scopeConfig->isSetFlag(self::PATH_CHAT);
+    }
+
+    /** Seconds to wait for the assistant: a local LLM takes far longer than a search. */
+    public function getChatTimeout(): int
+    {
+        return max(5, (int)$this->scopeConfig->getValue(self::PATH_CHAT_TIMEOUT) ?: 120);
     }
 
     public function getRecommendationLimit(): int

@@ -97,6 +97,22 @@
                     <depends><field id="enabled">1</field></depends>
                 </field>
             </group>
+
+            <group id="chat" translate="label" type="text" sortOrder="50" showInDefault="1" showInWebsite="0" showInStore="0">
+                <label>Shopping Assistant (AI chat)</label>
+                <depends><field id="visual_search/general/enabled">1</field></depends>
+                <field id="enabled" translate="label comment" type="select" sortOrder="10" showInDefault="1">
+                    <label>Show Chat Widget</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Adds a chat box to every storefront page that talks to the service's /agent/chat endpoint (needs Ollama running next to the service). Shoppers can type questions or attach a photo.</comment>
+                </field>
+                <field id="timeout" translate="label comment" type="text" sortOrder="20" showInDefault="1">
+                    <label>Assistant Timeout (seconds)</label>
+                    <validate>validate-digits validate-digits-range digits-range-5-600</validate>
+                    <comment>A local LLM can take a while, especially on the first message (model load).</comment>
+                    <depends><field id="enabled">1</field></depends>
+                </field>
+            </group>
         </section>
     </system>
 </config>
